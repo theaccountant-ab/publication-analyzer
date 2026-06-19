@@ -1,0 +1,142 @@
+# Publication Analyzer
+
+A tool that answers one question: **of the papers presented at a conference over
+the past few years, what fraction were later published in a top-tier journal?**
+It's a rough quality signal for a conference.
+
+It computes the rate over a conference's **program** (the papers presented — the
+denominator) by resolving each paper's publication in **[OpenAlex](https://openalex.org)**
+(free, no API key) and checking the journal against a top-tier list (the
+**Financial Times FT50 ∪ UT Dallas UTD24** by default).
+
+## Install
+
+```bash
+pip install -r requirements.txt
+```
+
+## How it works
+
+```
+program (papers presented)  ─►  match each paper in OpenAlex  ─►  journal in FT50/UTD24?  ─►  fraction
+```
+
+1. **Get the program** — the list of papers presented, per year. This is the
+   denominator, and how complete it is determines how rigorous the rate is. Two
+   sources are supported (see below).
+2. **Resolve each paper in OpenAlex** by title (plus authors/year when known),
+   conservatively: a candidate is accepted only on a close title match and, when
+   authors are known, an author-surname overlap. Only works hosted in a *journal*
+   count as published — working papers on SSRN/NBER/RePEc do not.
+3. **Classify the journal** against the top-tier list and report the fraction of
+   *presented* papers that reached a top-tier journal.
+
+### Where the program comes from
+
+The denominator is the part with no universal data source, so there are three
+ways to supply it (in decreasing order of rigor):
+
+- **Authoritative program CSV.** You supply the program as a CSV with columns
+  `conference, year, title, authors` (authors separated by `;`). Exact.
+- **Scrape the program pages (recommended).** Point the tool at each conference's
+  own program page (HTML or PDF) in a sources CSV (`conference, year, url`); it
+  fetches the page, converts it to text, and uses Gemini to extract the paper
+  list. Because it reads the conference's *actual* program, the denominator is as
+  complete as that page — and it's far less manual than hand-building the CSV.
+- **Best-effort search discovery (indicative).** With neither of the above, the
+  tool asks Gemini — grounded in Google Search — to list the program. A search
+  can't reliably enumerate a full program, so this **under-counts the
+  denominator**; treat it as indicative.
+
+In all three, OpenAlex resolves publications authoritatively.
+
+### Scraping programs
+
+```bash
+# 1. Scrape program pages into a reusable program CSV (review/edit it after).
+#    sources.csv columns: conference, url, and optional year
+python -m publication_analyzer scrape sources.csv -o programs.csv
+
+# 2. Analyze the scraped program.
+python -m publication_analyzer analyze --programs programs.csv --output rates.csv
+
+# Or do both in one shot:
+python -m publication_analyzer analyze --scrape sources.csv --output rates.csv
+```
+
+The two-step form is recommended: scraping is the lossy part, so writing
+`programs.csv` first lets you eyeball and fix it before computing the rate. PDF
+programs need the optional `pypdf` dependency (in `requirements.txt`); HTML needs
+nothing extra.
+
+## Use
+
+```bash
+# Scrape program pages into a program CSV (see "Scraping programs" above).
+python -m publication_analyzer scrape sources.csv -o programs.csv
+
+# Rigorous: supply the program. Columns: conference,year,title,authors
+python -m publication_analyzer analyze --programs programs.csv --output rates.csv
+
+# Narrow a big program CSV to just the conferences named in a file:
+python -m publication_analyzer analyze names.txt --programs programs.csv
+
+# Best-effort: discover programs via search (one conference name per line).
+python -m publication_analyzer analyze names.txt --years 3 --output rates.csv
+```
+
+It prints, per conference, how many presented papers reached a top-tier journal,
+how many were published in any journal, and how many matched in OpenAlex — plus
+an overall line. With `--output` it writes a per-conference CSV
+(`total_presented`, `matched_in_openalex`, `published_in_journal`,
+`top_tier_papers`, `top_tier_fraction`).
+
+## Configure
+
+A Gemini API key is needed for **scraping** and **search-based discovery** (both
+use Gemini to extract papers) but **not** for the `--programs` path. Set it in
+the environment (`GEMINI_API_KEY` / `GOOGLE_API_KEY`); get a free key at
+[aistudio.google.com](https://aistudio.google.com/app/apikey). Other settings go
+in a YAML file passed with `-c` (copy `config.example.yaml` to `config.yaml`):
+
+```yaml
+model: gemini-2.5-flash
+
+# Contact email for OpenAlex's faster "polite pool" (optional). Also PA_MAILTO.
+mailto: you@example.com
+
+# Journals counted as "top-tier". Names are matched after normalization
+# (case-insensitive; "The" prefix, "&"/"and", and trailing citation noise
+# ignored) using an EXACT match, so "Operations Research" will not wrongly match
+# "Annals of Operations Research". Omit this key to use the built-in default.
+top_tier_journals:
+  - Journal of Finance
+  - Journal of Financial Economics
+  - Review of Financial Studies
+  - American Economic Review
+  - Econometrica
+```
+
+**Default list.** When `top_tier_journals` is omitted, the built-in default is
+the **Financial Times FT50** (2026 refresh) unioned with the **UT Dallas UTD24**
+— 51 journals (UTD24 is a near-subset of the FT50; the only addition is *INFORMS
+Journal on Computing*).
+
+> **What's rigorous and what isn't.** The publication side (OpenAlex) is
+> authoritative. The denominator is only as complete as the program you give it:
+> the `--programs` CSV yields a rigorous rate; search-based discovery yields an
+> indicative one that understates the denominator. For finance/economics/business
+> conferences there is no machine-readable program API, so the CSV is the
+> reliable path.
+
+## Develop
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests stub the network (OpenAlex `fetch` and the scraper's `fetch`/`parse` are
+injected; no Gemini calls), covering year selection, journal matching, OpenAlex
+match acceptance/rejection, program CSV parsing, HTML/PDF text extraction,
+chunking, scrape dedup, and the end-to-end rate math.

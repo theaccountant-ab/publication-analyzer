@@ -1,0 +1,20 @@
+# Example configuration for the publication analyzer. Copy to config.yaml and
+# pass it with `-c config.yaml`. Set the Gemini API key via the environment
+# (GEMINI_API_KEY / GOOGLE_API_KEY), not here.
+
+model: gemini-2.5-flash
+
+# Contact email for OpenAlex's faster, more reliable "polite pool" (optional).
+# Can also be set via the PA_MAILTO environment variable.
+mailto: ""
+
+# Journals counted as "top-tier". Names are matched after normalization
+# (case/"The"/"&"-insensitive, trailing citation noise ignored) using an exact
+# match. Omit this key to use the built-in default (Financial Times FT50 unioned
+# with the UT Dallas UTD24 = 51 journals).
+top_tier_journals:
+  - Journal of Finance
+  - Journal of Financial Economics
+  - Review of Financial Studies
+  - American Economic Review
+  - Econometrica
