@@ -211,6 +211,77 @@ def test_render_fetch_delegates_pdfs_without_a_browser(monkeypatch):
     assert content_type == "application/pdf"
 
 
+def test_set_rate_limit_throttles_calls(monkeypatch):
+    import publication_analyzer.programs as programs_mod
+
+    clock = {"t": 100.0}
+    slept = []
+    monkeypatch.setattr(programs_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(programs_mod.time, "sleep", lambda s: slept.append(s))
+    try:
+        programs_mod.set_rate_limit(5)  # 5/min -> one call every 12s
+        programs_mod._throttle()        # first call: no wait, stamps t=100
+        clock["t"] = 104.0              # only 4s elapsed before the next call
+        programs_mod._throttle()        # must wait the remaining 8s
+        assert slept == [pytest.approx(8.0)]
+    finally:
+        programs_mod.set_rate_limit(0)  # disable so other tests are unaffected
+
+
+def test_set_rate_limit_zero_disables_throttle(monkeypatch):
+    import publication_analyzer.programs as programs_mod
+
+    slept = []
+    monkeypatch.setattr(programs_mod.time, "sleep", lambda s: slept.append(s))
+    programs_mod.set_rate_limit(0)
+    programs_mod._throttle()
+    programs_mod._throttle()
+    assert slept == []
+
+
+def test_scrape_to_programs_resumes_from_output(tmp_path, capsys):
+    from publication_analyzer import cli
+
+    sources = tmp_path / "sources.csv"
+    sources.write_text(
+        "conference,year,url\n"
+        "AFA,2023,http://a/2023\n"
+        "AFA,2024,http://a/2024\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "programs.csv"
+    # Pretend AFA 2023 was already scraped in a prior (aborted) run.
+    out.write_text(
+        "conference,year,title,authors\nAFA,2023,Old Paper,Jane Smith\n",
+        encoding="utf-8",
+    )
+
+    fetched = []
+
+    def fake_scrape_program(client, model, urls, *, year, fetch):
+        fetched.append((year, urls[0]))
+        return [Paper(title=f"Paper {year}", year=year)]
+
+    import publication_analyzer.cli as cli_mod
+    # Patch the symbol used inside _scrape_to_programs.
+    cli_mod.scrape_program = fake_scrape_program
+    try:
+        programs = cli._scrape_to_programs(
+            None, "model", str(sources), fetch=lambda u: (b"", "text/html"),
+            output=str(out),
+        )
+    finally:
+        from publication_analyzer.scrape import scrape_program as real
+        cli_mod.scrape_program = real
+
+    # Only the not-yet-done page was fetched; the done one was skipped.
+    assert fetched == [(2024, "http://a/2024")]
+    # The output now contains both the resumed row and the newly appended one.
+    text = out.read_text(encoding="utf-8")
+    assert "Old Paper" in text and "Paper 2024" in text
+    assert "skip AFA 2023" in capsys.readouterr().out
+
+
 def test_dedupe_fills_missing_fields():
     kept = dedupe_papers([
         Paper("Same Title", authors=[], year=None),

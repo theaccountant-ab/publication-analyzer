@@ -17,18 +17,27 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional, Set, Tuple
 
 from .analysis import analyze_program, recent_years
 from .config import Config, load_config
-from .programs import Paper, discover_program_via_search, read_program_csv
+from .programs import (
+    Paper,
+    discover_program_via_search,
+    read_program_csv,
+    set_rate_limit,
+)
 from .scrape import Fetcher, make_fetcher, read_scrape_sources, scrape_program
 
 
 def _client(config: Config):
     from google import genai
 
+    # Install the client-side throttle so every Gemini call respects the
+    # configured per-minute cap (important on the rate-limited free tier).
+    set_rate_limit(config.rate_limit_rpm)
     if not config.gemini_api_key:
         # The SDK also reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
         return genai.Client()
@@ -45,49 +54,87 @@ def _read_name_list(path: str) -> List[str]:
     return names
 
 
+def _done_pairs(path: Optional[str]) -> Set[Tuple[str, str]]:
+    """Return the ``(conference, year)`` pairs already present in an output CSV.
+
+    Used to resume a scrape: a page already extracted into ``path`` is skipped
+    rather than re-fetched. Returns an empty set if the file does not exist.
+    """
+    done: Set[Tuple[str, str]] = set()
+    if not path or not os.path.exists(path):
+        return done
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            done.add(((row.get("conference") or "").strip(),
+                      (row.get("year") or "").strip()))
+    return done
+
+
+def _append_program_csv(path: str, conference: str, papers: List[Paper]) -> None:
+    """Append a conference's papers to the output CSV, writing a header if new."""
+    new_file = not os.path.exists(path)
+    with open(path, "a", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        if new_file:
+            writer.writerow(["conference", "year", "title", "authors"])
+        for p in papers:
+            writer.writerow(
+                [conference, p.year or "", p.title, "; ".join(p.authors)]
+            )
+
+
 def _scrape_to_programs(
-    client, model: str, path: str, *, fetch: Fetcher
+    client, model: str, path: str, *, fetch: Fetcher,
+    output: Optional[str] = None,
 ) -> Dict[str, List[Paper]]:
-    """Scrape every page in a sources CSV into ``{conference: [Paper, ...]}``."""
+    """Scrape every page in a sources CSV into ``{conference: [Paper, ...]}``.
+
+    When ``output`` is given, each page's papers are appended to that CSV as soon
+    as the page is parsed, and pages already present there are skipped. This
+    makes a scrape resumable: if the run aborts (e.g. the API rate limit is hit),
+    re-running continues from where it stopped instead of starting over.
+    """
     sources = read_scrape_sources(path)
     programs: Dict[str, List[Paper]] = {}
+    done = _done_pairs(output)
     for conference, items in sources.items():
         papers: List[Paper] = []
         for year, url in items:
-            papers.extend(
-                scrape_program(client, model, [url], year=year, fetch=fetch)
+            key = (conference, str(year) if year is not None else "")
+            if output and key in done:
+                print(f"  skip {conference} {year or ''}: already scraped.")
+                continue
+            page_papers = scrape_program(
+                client, model, [url], year=year, fetch=fetch
             )
+            papers.extend(page_papers)
+            if output:
+                _append_program_csv(output, conference, page_papers)
         programs[conference] = papers
         print(
-            f"  scraped {conference}: {len(papers)} paper(s) "
+            f"  scraped {conference}: {len(papers)} new paper(s) "
             f"from {len(items)} page(s)."
         )
     return programs
 
 
-def _write_program_csv(path: str, programs: Dict[str, List[Paper]]) -> int:
-    rows = 0
-    with open(path, "w", encoding="utf-8", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["conference", "year", "title", "authors"])
-        for conference, papers in programs.items():
-            for p in papers:
-                writer.writerow(
-                    [conference, p.year or "", p.title, "; ".join(p.authors)]
-                )
-                rows += 1
-    return rows
-
-
 def cmd_scrape(config: Config, args: argparse.Namespace) -> int:
     print(f"Scraping conference programs listed in {args.file} ...")
+    if os.path.exists(args.output):
+        print(
+            f"  (resuming: {args.output} exists; already-scraped pages are "
+            f"skipped. Delete it for a fresh scrape.)"
+        )
     client = _client(config)
     fetch = make_fetcher(args.render or config.render)
-    programs = _scrape_to_programs(client, config.model, args.file, fetch=fetch)
-    n = _write_program_csv(args.output, programs)
+    programs = _scrape_to_programs(
+        client, config.model, args.file, fetch=fetch, output=args.output
+    )
+    total = sum(1 for _ in _done_pairs(args.output))  # pages, for a rough count
+    n = sum(len(p) for p in programs.values())
     print(
-        f"\nWrote {n} paper(s) across {len(programs)} conference(s) to "
-        f"{args.output}.\nReview it, then run: "
+        f"\nWrote {n} newly-scraped paper(s) to {args.output} "
+        f"({total} page(s) recorded so far).\nReview it, then run: "
         f"publication-analyzer analyze --programs {args.output}"
     )
     return 0

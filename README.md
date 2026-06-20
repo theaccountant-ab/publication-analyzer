@@ -69,6 +69,26 @@ The two-step form is recommended: scraping is the lossy part, so writing
 programs need the optional `pypdf` dependency (in `requirements.txt`); HTML needs
 nothing extra.
 
+#### Rate limits and resuming (free tier)
+
+Each program page is parsed by Gemini, and large programs are split into several
+chunks — so a multi-conference scrape makes many API calls. The free Gemini tier
+allows only ~5 requests/minute, which a burst will blow through (you'll see HTTP
+429s and the run aborts). Two settings make a free-tier scrape practical:
+
+- **Throttle** with `rate_limit_rpm` (config) or `PA_RATE_LIMIT_RPM` (env) to cap
+  calls per minute — e.g. `4` to stay under the free tier's 5/min.
+- **Resume**: `scrape` appends to the output CSV as each page is parsed and skips
+  pages already present, so if a run stops (rate limit, network), just re-run the
+  same command and it continues where it left off. Delete the output for a fresh
+  scrape.
+
+```bash
+PA_RATE_LIMIT_RPM=4 python -m publication_analyzer scrape sources.csv -o programs.csv
+# ... if it stops on a rate limit, re-run the exact same line to resume:
+PA_RATE_LIMIT_RPM=4 python -m publication_analyzer scrape sources.csv -o programs.csv
+```
+
 #### JavaScript-rendered program pages
 
 Many conference sites build the program list with client-side JavaScript, so a

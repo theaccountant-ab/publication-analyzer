@@ -14,6 +14,12 @@ mailto: ""
 # Can also be set via PA_RENDER or the --render flag.
 render: auto
 
+# Cap on Gemini requests per minute. The free tier allows only ~5/min, so a
+# large scrape without throttling fires a burst, exhausts its retries on HTTP
+# 429s, and aborts. Set this to stay safely under your tier's limit (e.g. 4 for
+# the free tier). 0 (default) disables the throttle. Also: PA_RATE_LIMIT_RPM.
+rate_limit_rpm: 0
+
 # Journals counted as "top-tier". Names are matched after normalization
 # (case/"The"/"&"-insensitive, trailing citation noise ignored) using an exact
 # match. Omit this key to use the built-in default (Financial Times FT50 unioned

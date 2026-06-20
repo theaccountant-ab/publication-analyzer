@@ -26,6 +26,29 @@ from .models import ProgramPaperList
 
 _TRANSIENT_CODES = {429, 500, 502, 503, 504}
 
+# Proactive client-side throttle. The free Gemini tier permits only a few
+# requests per minute; without spacing calls out, a large scrape fires a burst,
+# exhausts its retry budget on 429s, and aborts. ``set_rate_limit`` installs a
+# minimum interval between calls; ``_throttle`` enforces it before each request.
+_min_interval = 0.0
+_last_call = 0.0
+
+
+def set_rate_limit(rpm: float) -> None:
+    """Throttle Gemini calls to at most ``rpm`` requests per minute (0 = off)."""
+    global _min_interval
+    _min_interval = 60.0 / rpm if rpm and rpm > 0 else 0.0
+
+
+def _throttle() -> None:
+    global _last_call
+    if _min_interval <= 0:
+        return
+    wait = _min_interval - (time.monotonic() - _last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _last_call = time.monotonic()
+
 
 @dataclass
 class Paper:
@@ -125,6 +148,7 @@ def parse_program_text(
     delay = 2.0
     for attempt in range(max_retries + 1):
         try:
+            _throttle()
             response = client.models.generate_content(
                 model=model, contents=contents, config=config
             )
@@ -184,6 +208,7 @@ def discover_program_via_search(
     the API keeps failing, so the caller can record the failure.
     """
     years_str = ", ".join(str(y) for y in years)
+    _throttle()
     notes = client.models.generate_content(
         model=model,
         contents=_DISCOVERY_PROMPT.format(name=name, years=years_str),
