@@ -28,6 +28,13 @@ _USER_AGENT = (
     "Mozilla/5.0 (compatible; publication-analyzer/1.0; +https://openalex.org)"
 )
 
+# Default chunk size and output budget for a single parse. Larger chunks mean
+# fewer API calls per program (each call is rate-limited / quota-capped), and the
+# extracted paper list is compact JSON, so a generous output budget comfortably
+# covers even a dense chunk without truncation.
+DEFAULT_MAX_CHARS = 24000
+DEFAULT_MAX_OUTPUT_TOKENS = 16000
+
 # Fetcher returns (raw_bytes, content_type). Isolated so tests can inject one.
 Fetcher = Callable[[str], Tuple[bytes, str]]
 
@@ -215,7 +222,8 @@ def scrape_program(
     year: Optional[int] = None,
     fetch: Fetcher = _default_fetch,
     parse: Optional[Callable[[str], List[Paper]]] = None,
-    max_chars: int = 12000,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> List[Paper]:
     """Fetch program page(s), extract papers, and return a deduplicated list.
 
@@ -223,7 +231,11 @@ def scrape_program(
     any paper whose year the page didn't make explicit. Pages that fail to fetch
     are reported and skipped so one bad URL doesn't sink the run.
     """
-    do_parse = parse or (lambda text: parse_program_text(client, model, text))
+    do_parse = parse or (
+        lambda text: parse_program_text(
+            client, model, text, max_output_tokens=max_output_tokens
+        )
+    )
     papers: List[Paper] = []
     for url in urls:
         try:

@@ -97,7 +97,10 @@ def read_program_csv(path: str) -> Dict[str, List[Paper]]:
             programs.setdefault(conference, []).append(
                 Paper(title=title, authors=authors, year=year)
             )
-    return programs
+    # Dedupe per conference: a CSV written incrementally (e.g. one row per parsed
+    # chunk during a resumable scrape) can repeat a paper that straddles a chunk
+    # boundary; collapse those so the denominator isn't inflated.
+    return {conf: dedupe_papers(papers) for conf, papers in programs.items()}
 
 
 _DISCOVERY_PROMPT = """\

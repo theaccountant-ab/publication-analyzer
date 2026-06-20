@@ -17,19 +17,31 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import sys
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional
 
 from .analysis import analyze_program, recent_years
 from .config import Config, load_config
 from .programs import (
     Paper,
+    dedupe_papers,
     discover_program_via_search,
+    parse_program_text,
     read_program_csv,
     set_rate_limit,
 )
-from .scrape import Fetcher, make_fetcher, read_scrape_sources, scrape_program
+from .scrape import (
+    DEFAULT_MAX_CHARS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    Fetcher,
+    chunk_text,
+    fetch_text,
+    make_fetcher,
+    read_scrape_sources,
+    scrape_program,
+)
 
 
 def _client(config: Config):
@@ -54,22 +66,6 @@ def _read_name_list(path: str) -> List[str]:
     return names
 
 
-def _done_pairs(path: Optional[str]) -> Set[Tuple[str, str]]:
-    """Return the ``(conference, year)`` pairs already present in an output CSV.
-
-    Used to resume a scrape: a page already extracted into ``path`` is skipped
-    rather than re-fetched. Returns an empty set if the file does not exist.
-    """
-    done: Set[Tuple[str, str]] = set()
-    if not path or not os.path.exists(path):
-        return done
-    with open(path, "r", encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh):
-            done.add(((row.get("conference") or "").strip(),
-                      (row.get("year") or "").strip()))
-    return done
-
-
 def _append_program_csv(path: str, conference: str, papers: List[Paper]) -> None:
     """Append a conference's papers to the output CSV, writing a header if new."""
     new_file = not os.path.exists(path)
@@ -83,50 +79,106 @@ def _append_program_csv(path: str, conference: str, papers: List[Paper]) -> None
             )
 
 
+def _progress_path(output: Optional[str]) -> Optional[str]:
+    return f"{output}.progress.json" if output else None
+
+
+def _load_progress(path: Optional[str]) -> Dict[str, dict]:
+    """Load per-page chunk progress ``{conference|year: {done, total, complete}}``."""
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh) or {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_progress(path: str, progress: Dict[str, dict]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(progress, fh, indent=0, sort_keys=True)
+
+
 def _scrape_to_programs(
     client, model: str, path: str, *, fetch: Fetcher,
     output: Optional[str] = None,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> Dict[str, List[Paper]]:
     """Scrape every page in a sources CSV into ``{conference: [Paper, ...]}``.
 
-    When ``output`` is given, each page's papers are appended to that CSV as soon
-    as the page is parsed, and pages already present there are skipped. This
-    makes a scrape resumable: if the run aborts (e.g. the API rate limit is hit),
-    re-running continues from where it stopped instead of starting over.
+    When ``output`` is given the scrape is *resumable at chunk granularity*: each
+    parsed chunk's papers are appended to the CSV immediately and a sidecar
+    ``<output>.progress.json`` records how many of a page's chunks are done. If
+    the run stops (notably on the free tier's hard daily request cap), re-running
+    skips finished pages and resumes a partial page mid-way — so a page larger
+    than a day's quota still completes over several days instead of restarting
+    (and wasting quota) every time.
     """
     from google.genai import errors
 
     sources = read_scrape_sources(path)
     programs: Dict[str, List[Paper]] = {}
-    done = _done_pairs(output)
+    prog_path = _progress_path(output)
+    progress = _load_progress(prog_path)
     for conference, items in sources.items():
         papers: List[Paper] = []
         for year, url in items:
-            key = (conference, str(year) if year is not None else "")
-            if output and key in done:
+            key = f"{conference}|{year if year is not None else ''}"
+            state = progress.get(key, {})
+            if state.get("complete"):
                 print(f"  skip {conference} {year or ''}: already scraped.")
                 continue
             try:
-                page_papers = scrape_program(
-                    client, model, [url], year=year, fetch=fetch
+                chunks = chunk_text(
+                    fetch_text(url, fetch=fetch), max_chars=max_chars
                 )
+            except Exception as exc:  # network / decode / PDF errors
+                print(f"  ! failed to fetch {url}: {exc}")
+                continue
+            start = min(int(state.get("done", 0)), len(chunks))
+            if start:
+                print(
+                    f"  resume {conference} {year or ''}: "
+                    f"{start}/{len(chunks)} chunk(s) already done."
+                )
+            try:
+                for i in range(start, len(chunks)):
+                    found = parse_program_text(
+                        client, model, chunks[i],
+                        max_output_tokens=max_output_tokens,
+                    )
+                    if year is not None:
+                        for p in found:
+                            if p.year is None:
+                                p.year = year
+                    found = dedupe_papers(found)
+                    papers.extend(found)
+                    if output:
+                        _append_program_csv(output, conference, found)
+                    if prog_path:
+                        progress[key] = {
+                            "done": i + 1, "total": len(chunks),
+                            "complete": False,
+                        }
+                        _save_progress(prog_path, progress)
             except errors.APIError as exc:
-                # A rate-limit / quota error (notably the free tier's hard daily
-                # request cap) can't be waited out within a run. Stop cleanly so
-                # the pages already written are kept; re-running resumes the rest.
+                # A quota / rate-limit error (notably the free tier's daily cap)
+                # can't be waited out. Stop cleanly; finished chunks are saved.
                 if getattr(exc, "code", None) == 429:
-                    n_done = len(_done_pairs(output)) if output else 0
                     print(
                         f"\n  ! Gemini quota/rate limit reached while scraping "
-                        f"{conference} {year or ''}. Stopping with "
-                        f"{n_done} page(s) saved so far. Re-run the same command "
+                        f"{conference} {year or ''} (at chunk {i + 1}/"
+                        f"{len(chunks)}). Progress saved; re-run the same command "
                         f"(e.g. tomorrow, once the daily quota resets) to resume."
                     )
                     return programs
                 raise
-            papers.extend(page_papers)
-            if output:
-                _append_program_csv(output, conference, page_papers)
+            if prog_path:  # page fully parsed
+                progress[key] = {
+                    "done": len(chunks), "total": len(chunks), "complete": True,
+                }
+                _save_progress(prog_path, progress)
         programs[conference] = papers
         print(
             f"  scraped {conference}: {len(papers)} new paper(s) "
@@ -139,19 +191,21 @@ def cmd_scrape(config: Config, args: argparse.Namespace) -> int:
     print(f"Scraping conference programs listed in {args.file} ...")
     if os.path.exists(args.output):
         print(
-            f"  (resuming: {args.output} exists; already-scraped pages are "
-            f"skipped. Delete it for a fresh scrape.)"
+            f"  (resuming: {args.output} exists; finished pages are skipped and "
+            f"a partial page continues mid-way. Delete it and its .progress.json "
+            f"for a fresh scrape.)"
         )
     client = _client(config)
     fetch = make_fetcher(args.render or config.render)
     programs = _scrape_to_programs(
         client, config.model, args.file, fetch=fetch, output=args.output
     )
-    total = sum(1 for _ in _done_pairs(args.output))  # pages, for a rough count
+    progress = _load_progress(_progress_path(args.output))
+    complete = sum(1 for s in progress.values() if s.get("complete"))
     n = sum(len(p) for p in programs.values())
     print(
         f"\nWrote {n} newly-scraped paper(s) to {args.output} "
-        f"({total} page(s) recorded so far).\nReview it, then run: "
+        f"({complete} page(s) fully scraped so far).\nReview it, then run: "
         f"publication-analyzer analyze --programs {args.output}"
     )
     return 0

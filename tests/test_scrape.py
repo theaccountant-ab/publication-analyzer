@@ -239,8 +239,14 @@ def test_set_rate_limit_zero_disables_throttle(monkeypatch):
     assert slept == []
 
 
-def test_scrape_to_programs_resumes_from_output(tmp_path, capsys):
+def _html_fetcher(body: bytes):
+    return lambda url: (body, "text/html")
+
+
+def test_scrape_to_programs_resumes_finished_page(tmp_path, capsys):
+    import json
     from publication_analyzer import cli
+    import publication_analyzer.cli as cli_mod
 
     sources = tmp_path / "sources.csv"
     sources.write_text(
@@ -250,73 +256,91 @@ def test_scrape_to_programs_resumes_from_output(tmp_path, capsys):
         encoding="utf-8",
     )
     out = tmp_path / "programs.csv"
-    # Pretend AFA 2023 was already scraped in a prior (aborted) run.
     out.write_text(
         "conference,year,title,authors\nAFA,2023,Old Paper,Jane Smith\n",
         encoding="utf-8",
     )
+    # Sidecar marks AFA 2023 fully scraped (one chunk done).
+    (tmp_path / "programs.csv.progress.json").write_text(
+        json.dumps({"AFA|2023": {"done": 1, "total": 1, "complete": True}}),
+        encoding="utf-8",
+    )
 
-    fetched = []
+    parsed_for = []
 
-    def fake_scrape_program(client, model, urls, *, year, fetch):
-        fetched.append((year, urls[0]))
-        return [Paper(title=f"Paper {year}", year=year)]
+    def fake_parse(client, model, text, **kw):
+        parsed_for.append(text)
+        return [Paper(title="New Paper")]
 
-    import publication_analyzer.cli as cli_mod
-    # Patch the symbol used inside _scrape_to_programs.
-    cli_mod.scrape_program = fake_scrape_program
+    cli_mod.parse_program_text = fake_parse
     try:
-        programs = cli._scrape_to_programs(
-            None, "model", str(sources), fetch=lambda u: (b"", "text/html"),
+        cli._scrape_to_programs(
+            None, "model", str(sources), fetch=_html_fetcher(b"<li>x</li>"),
             output=str(out),
         )
     finally:
-        from publication_analyzer.scrape import scrape_program as real
-        cli_mod.scrape_program = real
+        from publication_analyzer.programs import parse_program_text as real
+        cli_mod.parse_program_text = real
 
-    # Only the not-yet-done page was fetched; the done one was skipped.
-    assert fetched == [(2024, "http://a/2024")]
-    # The output now contains both the resumed row and the newly appended one.
+    # The finished page was skipped (parsed once, for 2024 only).
+    assert len(parsed_for) == 1
     text = out.read_text(encoding="utf-8")
-    assert "Old Paper" in text and "Paper 2024" in text
+    assert "Old Paper" in text and "New Paper" in text
     assert "skip AFA 2023" in capsys.readouterr().out
 
 
-def test_scrape_to_programs_stops_cleanly_on_quota(tmp_path, capsys):
+def test_scrape_to_programs_resumes_partial_page_mid_chunk(tmp_path, capsys):
+    """A page stopped mid-way resumes from the next unparsed chunk."""
+    import json
     from google.genai import errors
     from publication_analyzer import cli
     import publication_analyzer.cli as cli_mod
 
     sources = tmp_path / "sources.csv"
-    sources.write_text(
-        "conference,year,url\n"
-        "AFA,2023,http://a/2023\n"
-        "AFA,2024,http://a/2024\n",
-        encoding="utf-8",
-    )
+    sources.write_text("conference,year,url\nAFA,2024,http://a/2024\n",
+                       encoding="utf-8")
     out = tmp_path / "programs.csv"
+    prog = tmp_path / "programs.csv.progress.json"
 
-    calls = {"n": 0}
+    # A body that chunk_text (max_chars=20) splits into several chunks.
+    body = ("\n".join(f"line {i}" for i in range(20))).encode()
 
-    def fake_scrape_program(client, model, urls, *, year, fetch):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return [Paper(title="First", year=year)]
-        raise errors.ClientError(429, {"error": {"message": "quota"}}, None)
+    seen = []
 
-    cli_mod.scrape_program = fake_scrape_program
+    def fail_on_third(client, model, text, **kw):
+        seen.append(text)
+        if len(seen) == 3:
+            raise errors.ClientError(429, {"error": {"message": "quota"}}, None)
+        return [Paper(title=f"P{len(seen)}")]
+
+    cli_mod.parse_program_text = fail_on_third
     try:
-        programs = cli._scrape_to_programs(
-            None, "model", str(sources), fetch=lambda u: (b"", "text/html"),
-            output=str(out),
+        cli._scrape_to_programs(
+            None, "model", str(sources), fetch=_html_fetcher(body),
+            output=str(out), max_chars=20,
+        )
+        # First run: two chunks saved before the 429 on the third.
+        assert "quota/rate limit reached" in capsys.readouterr().out
+        state = json.loads(prog.read_text())["AFA|2024"]
+        assert state["done"] == 2 and state["complete"] is False
+
+        # Resume: parsing succeeds now; it must start at chunk index 2, not 0.
+        seen.clear()
+        def succeed(client, model, text, **kw):
+            seen.append(text)
+            return [Paper(title=f"R{len(seen)}")]
+        cli_mod.parse_program_text = succeed
+        cli._scrape_to_programs(
+            None, "model", str(sources), fetch=_html_fetcher(body),
+            output=str(out), max_chars=20,
         )
     finally:
-        from publication_analyzer.scrape import scrape_program as real
-        cli_mod.scrape_program = real
+        from publication_analyzer.programs import parse_program_text as real
+        cli_mod.parse_program_text = real
 
-    # The first page's work is saved; the run stops without raising on the 429.
-    assert "First" in out.read_text(encoding="utf-8")
-    assert "quota/rate limit reached" in capsys.readouterr().out
+    # The resume reported "2/N already done" and finished the page.
+    assert "resume AFA 2024: 2/" in capsys.readouterr().out
+    assert json.loads(prog.read_text())["AFA|2024"]["complete"] is True
 
 
 def test_dedupe_fills_missing_fields():

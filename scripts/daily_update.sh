@@ -20,11 +20,12 @@ PROGRAMS="${PA_PROGRAMS:-data/programs.csv}"
 echo "== $(date -u +%FT%TZ) resuming scrape =="
 python -m publication_analyzer -c config.yaml scrape "$SOURCES" -o "$PROGRAMS"
 
-if [[ -n "$(git status --porcelain "$PROGRAMS")" ]]; then
-  git add "$PROGRAMS"
+PROGRESS="${PROGRAMS}.progress.json"
+if [[ -n "$(git status --porcelain "$PROGRAMS" "$PROGRESS")" ]]; then
+  git add "$PROGRAMS" "$PROGRESS"
   git commit -m "Update scraped programs ($(date -u +%F))"
   git push origin "$BRANCH"
-  echo "== pushed updated $PROGRAMS =="
+  echo "== pushed updated $PROGRAMS (+ resume state) =="
 else
   echo "== no new rows; nothing to commit =="
 fi

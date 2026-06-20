@@ -78,10 +78,17 @@ allows only ~5 requests/minute, which a burst will blow through (you'll see HTTP
 
 - **Throttle** with `rate_limit_rpm` (config) or `PA_RATE_LIMIT_RPM` (env) to cap
   calls per minute — e.g. `4` to stay under the free tier's 5/min.
-- **Resume**: `scrape` appends to the output CSV as each page is parsed and skips
-  pages already present, so if a run stops (rate limit, network), just re-run the
-  same command and it continues where it left off. Delete the output for a fresh
-  scrape.
+- **Resume** (per chunk): `scrape` appends papers to the output CSV as each chunk
+  is parsed and records progress in a sidecar `<output>.progress.json`. If a run
+  stops (rate limit, network), just re-run the same command: finished pages are
+  skipped and a partially-parsed page continues from its next chunk — so a page
+  bigger than a day's quota still completes over several runs instead of
+  restarting and wasting calls. Delete the output CSV *and* its `.progress.json`
+  for a fresh scrape.
+
+On the free tier's hard daily cap (~20 requests/day for `gemini-2.5-flash`), a
+large source list naturally fills in over several days of repeated runs;
+`scripts/daily_update.sh` runs one such pass and commits the new rows.
 
 ```bash
 PA_RATE_LIMIT_RPM=4 python -m publication_analyzer scrape sources.csv -o programs.csv
