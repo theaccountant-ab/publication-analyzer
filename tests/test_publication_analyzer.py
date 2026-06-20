@@ -172,6 +172,26 @@ def test_fraction_is_none_for_empty_program():
     assert analysis.top_tier_fraction is None
 
 
+def test_reported_years_come_from_program_when_known():
+    # A program supplies its own years; the reported years should reflect those,
+    # not the search look-back window passed in.
+    papers = [Paper("P1", year=2014), Paper("P2", year=2018), Paper("P3", year=2018)]
+    analysis = analyze_program(
+        papers, conference="C", years=[2025, 2024, 2023],
+        lookup=lambda *a, **k: None,
+    )
+    assert analysis.years == [2018, 2014]   # distinct program years, most recent first
+
+
+def test_reported_years_fall_back_to_window_when_program_has_none():
+    papers = [Paper("P1"), Paper("P2")]     # no years (e.g. search discovery)
+    analysis = analyze_program(
+        papers, conference="C", years=[2025, 2024, 2023],
+        lookup=lambda *a, **k: None,
+    )
+    assert analysis.years == [2025, 2024, 2023]
+
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #

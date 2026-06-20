@@ -200,9 +200,17 @@ def analyze_program(
     ``lookup`` is injectable so the OpenAlex network call can be stubbed in
     tests. A paper counts as top-tier only when OpenAlex matches it to a journal
     article whose journal is on ``top_tier``.
+
+    ``years`` is the window to *report* when the program itself carries no year
+    (e.g. search discovery). When the papers do have years — as with an
+    authoritative or scraped program — those are reported instead, so the result
+    reflects the program supplied rather than the search look-back.
     """
     top_tier = DEFAULT_TOP_TIER_JOURNALS if top_tier is None else top_tier
-    analysis = PublicationAnalysis(conference=conference, years=list(years))
+    program_years = sorted({p.year for p in papers if p.year is not None}, reverse=True)
+    analysis = PublicationAnalysis(
+        conference=conference, years=program_years or list(years)
+    )
     for paper in papers:
         match = lookup(paper.title, year=paper.year, authors=paper.authors, mailto=mailto)
         journal = match.source_name if (match and match.is_journal_article) else None
