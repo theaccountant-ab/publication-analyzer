@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -27,6 +28,11 @@ OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 
 # Accept a candidate only when the normalized titles are at least this similar.
 _TITLE_MATCH_THRESHOLD = 0.90
+# At/above this similarity a title match is accepted even without an author-surname
+# overlap. Program scrapes often misattribute authors (e.g. a discussant listed in
+# place of the author), so a near-exact title on a specific multi-word paper is a
+# stronger signal than the scraped author list.
+_TITLE_NEAR_EXACT = 0.95
 
 _THE_PREFIX = re.compile(r"^the\s+")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -51,10 +57,24 @@ class PublicationMatch:
 
 
 def _normalize_title(title: str) -> str:
-    s = (title or "").strip().lower()
+    # NFKD folds typographic ligatures (e.g. "ﬁ"/"ﬂ" from PDF text) back to ASCII
+    # so "Inﬂation" and "Inflation" compare equal.
+    s = unicodedata.normalize("NFKD", title or "").strip().lower()
     s = _THE_PREFIX.sub("", s)
     s = _NON_ALNUM.sub(" ", s).strip()
     return re.sub(r"\s+", " ", s)
+
+
+def _search_term(title: str) -> str:
+    """A punctuation-free term safe for OpenAlex's ``title.search`` filter.
+
+    Commas and colons are structural in the filter syntax (a comma separates
+    filters), so a raw title containing them yields HTTP 400. Folding ligatures
+    and stripping punctuation also makes the full-text search more forgiving.
+    """
+    s = unicodedata.normalize("NFKD", title or "")
+    s = re.sub(r"[^0-9A-Za-z\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _surnames(authors: Optional[List[str]]) -> set:
@@ -102,8 +122,11 @@ def lookup_publication(
     if not title:
         return None
 
+    search_term = _search_term(title)
+    if not search_term:
+        return None
     params = {
-        "filter": f"title.search:{title}",
+        "filter": f"title.search:{search_term}",
         "per-page": "10",
         "select": "id,title,type,publication_year,primary_location,authorships",
     }
@@ -132,8 +155,13 @@ def lookup_publication(
         sim = SequenceMatcher(None, want_title, _normalize_title(cand_title)).ratio()
         if sim < _TITLE_MATCH_THRESHOLD:
             continue
-        # When we know the authors, require at least one surname in common.
-        if want_surnames and not (want_surnames & _surnames(_author_names(work))):
+        # Require an author-surname overlap, except for near-exact matches on a
+        # specific (multi-word) title, where the title alone is a strong signal and
+        # the scraped author list is often unreliable.
+        near_exact = sim >= _TITLE_NEAR_EXACT and len(want_title.split()) >= 4
+        if want_surnames and not near_exact and not (
+            want_surnames & _surnames(_author_names(work))
+        ):
             continue
         # When we know the year, ignore works published before it (a conference
         # paper is published in the same year or later).

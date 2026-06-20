@@ -110,6 +110,46 @@ def test_lookup_returns_none_on_fetch_error():
     assert lookup_publication("Anything", fetch=boom, max_retries=0) is None
 
 
+def test_normalize_title_folds_ligatures():
+    from publication_analyzer.openalex import _normalize_title
+    assert _normalize_title("Inﬂation") == _normalize_title("Inflation")
+    assert _normalize_title("Beneﬁtting from ESG") == _normalize_title("Benefitting from ESG")
+
+
+def test_search_term_strips_punctuation_and_ligatures():
+    from publication_analyzer.openalex import _search_term
+    # Commas/colons would break OpenAlex's title.search filter; they must go.
+    term = _search_term("Lending, Credit Rationing: Eﬀects")
+    assert "," not in term and ":" not in term
+    assert "ff" in term.lower()  # "Eﬀects" -> "Effects"
+    assert term.split() == ["Lending", "Credit", "Rationing", "Effects"]
+
+
+def test_lookup_accepts_near_exact_title_without_author_overlap():
+    # Scrapes often misattribute authors; a near-exact, specific title should
+    # still match even when the scraped author surname doesn't overlap.
+    payload = {"results": [_work(
+        "A Model of Informed Intermediation in the Market for Going Public",
+        "Journal of Finance", "journal", authors=["Aydogan Alti", "Jonathan Cohn"],
+    )]}
+    match = lookup_publication(
+        "A Model of Informed Intermediation in the Market for Going Public",
+        authors=["Christian C. Opp"],  # wrong (a discussant), no overlap
+        fetch=lambda url: payload,
+    )
+    assert match is not None and match.is_journal_article
+
+
+def test_lookup_short_title_still_requires_author_overlap():
+    # A short, generic title is NOT near-exact-safe, so a non-overlapping author
+    # list must still reject it (precision preserved).
+    payload = {"results": [_work("Common Title", "Journal of Finance", "journal",
+                                 authors=["Alice Brown"])]}
+    assert lookup_publication(
+        "Common Title", authors=["John Smith"], fetch=lambda url: payload
+    ) is None
+
+
 # --------------------------------------------------------------------------- #
 # Program CSV parsing
 # --------------------------------------------------------------------------- #
