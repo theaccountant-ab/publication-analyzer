@@ -94,6 +94,8 @@ def _scrape_to_programs(
     makes a scrape resumable: if the run aborts (e.g. the API rate limit is hit),
     re-running continues from where it stopped instead of starting over.
     """
+    from google.genai import errors
+
     sources = read_scrape_sources(path)
     programs: Dict[str, List[Paper]] = {}
     done = _done_pairs(output)
@@ -104,9 +106,24 @@ def _scrape_to_programs(
             if output and key in done:
                 print(f"  skip {conference} {year or ''}: already scraped.")
                 continue
-            page_papers = scrape_program(
-                client, model, [url], year=year, fetch=fetch
-            )
+            try:
+                page_papers = scrape_program(
+                    client, model, [url], year=year, fetch=fetch
+                )
+            except errors.APIError as exc:
+                # A rate-limit / quota error (notably the free tier's hard daily
+                # request cap) can't be waited out within a run. Stop cleanly so
+                # the pages already written are kept; re-running resumes the rest.
+                if getattr(exc, "code", None) == 429:
+                    n_done = len(_done_pairs(output)) if output else 0
+                    print(
+                        f"\n  ! Gemini quota/rate limit reached while scraping "
+                        f"{conference} {year or ''}. Stopping with "
+                        f"{n_done} page(s) saved so far. Re-run the same command "
+                        f"(e.g. tomorrow, once the daily quota resets) to resume."
+                    )
+                    return programs
+                raise
             papers.extend(page_papers)
             if output:
                 _append_program_csv(output, conference, page_papers)

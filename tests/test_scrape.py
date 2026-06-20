@@ -282,6 +282,43 @@ def test_scrape_to_programs_resumes_from_output(tmp_path, capsys):
     assert "skip AFA 2023" in capsys.readouterr().out
 
 
+def test_scrape_to_programs_stops_cleanly_on_quota(tmp_path, capsys):
+    from google.genai import errors
+    from publication_analyzer import cli
+    import publication_analyzer.cli as cli_mod
+
+    sources = tmp_path / "sources.csv"
+    sources.write_text(
+        "conference,year,url\n"
+        "AFA,2023,http://a/2023\n"
+        "AFA,2024,http://a/2024\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "programs.csv"
+
+    calls = {"n": 0}
+
+    def fake_scrape_program(client, model, urls, *, year, fetch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [Paper(title="First", year=year)]
+        raise errors.ClientError(429, {"error": {"message": "quota"}}, None)
+
+    cli_mod.scrape_program = fake_scrape_program
+    try:
+        programs = cli._scrape_to_programs(
+            None, "model", str(sources), fetch=lambda u: (b"", "text/html"),
+            output=str(out),
+        )
+    finally:
+        from publication_analyzer.scrape import scrape_program as real
+        cli_mod.scrape_program = real
+
+    # The first page's work is saved; the run stops without raising on the 429.
+    assert "First" in out.read_text(encoding="utf-8")
+    assert "quota/rate limit reached" in capsys.readouterr().out
+
+
 def test_dedupe_fills_missing_fields():
     kept = dedupe_papers([
         Paper("Same Title", authors=[], year=None),
