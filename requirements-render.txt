@@ -1,0 +1,4 @@
+# Optional: render JavaScript-heavy program pages with a headless browser.
+# Used only by `scrape`/`analyze --scrape` when --render is auto/always.
+# After installing, fetch the browser binary once: `playwright install chromium`.
+playwright>=1.40

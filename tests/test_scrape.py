@@ -1,10 +1,12 @@
 import pytest
 
+import publication_analyzer.scrape as scrape_mod
 from publication_analyzer.programs import Paper, dedupe_papers
 from publication_analyzer.scrape import (
     chunk_text,
     fetch_text,
     html_to_text,
+    make_fetcher,
     read_scrape_sources,
     scrape_program,
 )
@@ -123,6 +125,90 @@ def test_read_scrape_sources_requires_columns(tmp_path):
     bad.write_text("conference,year\nAFA,2024\n", encoding="utf-8")
     with pytest.raises(ValueError):
         read_scrape_sources(str(bad))
+
+
+def test_make_fetcher_modes():
+    assert make_fetcher("never") is scrape_mod._default_fetch
+    assert make_fetcher("always") is scrape_mod._render_fetch
+    assert make_fetcher("auto") is scrape_mod._auto_fetch
+    assert make_fetcher("anything-else") is scrape_mod._auto_fetch  # defaults to auto
+
+
+def test_looks_unrendered_detects_placeholder_and_thin_pages():
+    assert scrape_mod._looks_unrendered("Loading...")
+    assert scrape_mod._looks_unrendered("Please enable JavaScript to view this.")
+    assert scrape_mod._looks_unrendered("tiny")
+    # A page with real content and no placeholder is considered rendered.
+    assert not scrape_mod._looks_unrendered("A real paper title and authors. " * 40)
+
+
+def test_auto_fetch_renders_when_static_is_unrendered(monkeypatch):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"<div>Loading...</div>", "text/html"),
+    )
+    rendered = b"<li>Real Paper by A. Author</li>" * 30
+    monkeypatch.setattr(
+        scrape_mod, "_render_fetch",
+        lambda url, *, timeout=30.0: (rendered, "text/html"),
+    )
+    data, content_type = scrape_mod._auto_fetch("http://x/prog")
+    assert data == rendered and content_type == "text/html"
+
+
+def test_auto_fetch_keeps_static_when_page_is_rich(monkeypatch):
+    rich = ("<li>Paper " + "x" * 50 + "</li>").encode() * 20
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (rich, "text/html"),
+    )
+    called = {"render": False}
+
+    def boom(url, *, timeout=30.0):
+        called["render"] = True
+        return b"", "text/html"
+
+    monkeypatch.setattr(scrape_mod, "_render_fetch", boom)
+    data, _ = scrape_mod._auto_fetch("http://x/prog")
+    assert data == rich and not called["render"]
+
+
+def test_auto_fetch_does_not_render_pdfs(monkeypatch):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"%PDF-1.4", "application/pdf"),
+    )
+    called = {"render": False}
+    monkeypatch.setattr(
+        scrape_mod, "_render_fetch",
+        lambda *a, **k: called.__setitem__("render", True) or (b"", "text/html"),
+    )
+    data, content_type = scrape_mod._auto_fetch("http://x/agenda.pdf")
+    assert content_type == "application/pdf" and not called["render"]
+
+
+def test_auto_fetch_falls_back_when_render_unavailable(monkeypatch, capsys):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"<div>Loading...</div>", "text/html"),
+    )
+
+    def missing(url, *, timeout=30.0):
+        raise RuntimeError("JS rendering requires 'playwright'")
+
+    monkeypatch.setattr(scrape_mod, "_render_fetch", missing)
+    data, _ = scrape_mod._auto_fetch("http://x/prog")
+    assert data == b"<div>Loading...</div>"            # kept the static body
+    assert "cannot render" in capsys.readouterr().out  # warned the user
+
+
+def test_render_fetch_delegates_pdfs_without_a_browser(monkeypatch):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"%PDF-1.4", "application/pdf"),
+    )
+    data, content_type = scrape_mod._render_fetch("http://x/agenda.PDF?v=1")
+    assert content_type == "application/pdf"
 
 
 def test_dedupe_fills_missing_fields():

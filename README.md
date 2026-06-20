@@ -69,6 +69,34 @@ The two-step form is recommended: scraping is the lossy part, so writing
 programs need the optional `pypdf` dependency (in `requirements.txt`); HTML needs
 nothing extra.
 
+#### JavaScript-rendered program pages
+
+Many conference sites build the program list with client-side JavaScript, so a
+plain fetch sees only a `Loading…` shell. To handle these, the scraper can render
+the page in a headless browser first. It's an optional dependency:
+
+```bash
+pip install -r requirements-render.txt
+playwright install chromium   # one-time browser download
+```
+
+Rendering is controlled by `--render` (on both `scrape` and `analyze --scrape`),
+or the `render:` config key / `PA_RENDER` env var:
+
+- `auto` *(default)* — fetch statically, and re-fetch through the browser only
+  when the page looks unrendered (a `Loading…`/"enable JavaScript" placeholder or
+  suspiciously little text). If `playwright` isn't installed, it prints a hint and
+  falls back to the static fetch.
+- `always` — render every page (slower; use when `auto` guesses wrong).
+- `never` — plain HTTP only (the original behavior).
+
+```bash
+python -m publication_analyzer scrape sources.csv -o programs.csv --render auto
+```
+
+PDFs are never rendered (there's nothing to run), so mixing PDF and JS pages in
+one `sources.csv` is fine.
+
 ## Use
 
 ```bash
@@ -104,6 +132,11 @@ model: gemini-2.5-flash
 
 # Contact email for OpenAlex's faster "polite pool" (optional). Also PA_MAILTO.
 mailto: you@example.com
+
+# How to fetch program pages when scraping: auto (default) | always | never.
+# "auto" renders JS-heavy pages in a headless browser only when needed. Also
+# PA_RENDER or --render. See "JavaScript-rendered program pages" above.
+render: auto
 
 # Journals counted as "top-tier". Names are matched after normalization
 # (case-insensitive; "The" prefix, "&"/"and", and trailing citation noise

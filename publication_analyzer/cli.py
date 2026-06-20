@@ -23,7 +23,7 @@ from typing import Dict, List
 from .analysis import analyze_program, recent_years
 from .config import Config, load_config
 from .programs import Paper, discover_program_via_search, read_program_csv
-from .scrape import read_scrape_sources, scrape_program
+from .scrape import Fetcher, make_fetcher, read_scrape_sources, scrape_program
 
 
 def _client(config: Config):
@@ -45,14 +45,18 @@ def _read_name_list(path: str) -> List[str]:
     return names
 
 
-def _scrape_to_programs(client, model: str, path: str) -> Dict[str, List[Paper]]:
+def _scrape_to_programs(
+    client, model: str, path: str, *, fetch: Fetcher
+) -> Dict[str, List[Paper]]:
     """Scrape every page in a sources CSV into ``{conference: [Paper, ...]}``."""
     sources = read_scrape_sources(path)
     programs: Dict[str, List[Paper]] = {}
     for conference, items in sources.items():
         papers: List[Paper] = []
         for year, url in items:
-            papers.extend(scrape_program(client, model, [url], year=year))
+            papers.extend(
+                scrape_program(client, model, [url], year=year, fetch=fetch)
+            )
         programs[conference] = papers
         print(
             f"  scraped {conference}: {len(papers)} paper(s) "
@@ -78,7 +82,8 @@ def _write_program_csv(path: str, programs: Dict[str, List[Paper]]) -> int:
 def cmd_scrape(config: Config, args: argparse.Namespace) -> int:
     print(f"Scraping conference programs listed in {args.file} ...")
     client = _client(config)
-    programs = _scrape_to_programs(client, config.model, args.file)
+    fetch = make_fetcher(args.render or config.render)
+    programs = _scrape_to_programs(client, config.model, args.file, fetch=fetch)
     n = _write_program_csv(args.output, programs)
     print(
         f"\nWrote {n} paper(s) across {len(programs)} conference(s) to "
@@ -111,7 +116,10 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
     elif args.scrape:
         print(f"Scraping conference programs listed in {args.scrape} ...")
         client = _client(config)
-        programs = _scrape_to_programs(client, config.model, args.scrape)
+        fetch = make_fetcher(args.render or config.render)
+        programs = _scrape_to_programs(
+            client, config.model, args.scrape, fetch=fetch
+        )
         print()
     else:
         if not args.file:
@@ -230,6 +238,12 @@ def build_parser() -> argparse.ArgumentParser:
         "Used for search-based discovery; ignored when --programs supplies years.",
     )
     p.add_argument(
+        "--render", choices=("auto", "always", "never"), default=None,
+        help="How to fetch pages with --scrape: 'auto' (default) renders via a "
+        "headless browser only when a page looks JS-rendered, 'always' renders "
+        "every page, 'never' uses plain HTTP. Needs the optional 'playwright'.",
+    )
+    p.add_argument(
         "--output", default=None,
         help="Optional CSV path to write per-conference results to.",
     )
@@ -246,6 +260,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "-o", "--output", default="programs.csv",
         help="Program CSV to write (default: programs.csv).",
+    )
+    s.add_argument(
+        "--render", choices=("auto", "always", "never"), default=None,
+        help="How to fetch pages: 'auto' (default) renders via a headless "
+        "browser only when a page looks JS-rendered, 'always' renders every "
+        "page, 'never' uses plain HTTP. Needs the optional 'playwright'.",
     )
     return parser
 

@@ -27,6 +27,10 @@ class Config:
     # Contact email for OpenAlex's "polite pool" (optional but recommended for
     # faster, more reliable responses). Set via PA_MAILTO or the YAML `mailto`.
     mailto: str = ""
+    # How to fetch program pages when scraping: "auto" renders via a headless
+    # browser only when a page looks JS-rendered, "always" renders every page,
+    # "never" uses plain HTTP. Set via PA_RENDER or the YAML `render`.
+    render: str = "auto"
 
 
 def _env(name: str, default: str = "") -> str:
@@ -51,4 +55,5 @@ def load_config(path: Optional[str] = None) -> Config:
         model=_env("PA_MODEL", data.get("model", "gemini-2.5-flash")),
         top_tier_journals=list(data.get("top_tier_journals", []) or []),
         mailto=_env("PA_MAILTO", data.get("mailto", "")),
+        render=_env("PA_RENDER", data.get("render", "auto")),
     )

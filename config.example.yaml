@@ -8,6 +8,12 @@ model: gemini-2.5-flash
 # Can also be set via the PA_MAILTO environment variable.
 mailto: ""
 
+# How to fetch program pages when scraping: auto (default) | always | never.
+# "auto" renders JS-heavy pages in a headless browser only when the static page
+# looks unrendered (needs the optional 'playwright'; see requirements-render.txt).
+# Can also be set via PA_RENDER or the --render flag.
+render: auto
+
 # Journals counted as "top-tier". Names are matched after normalization
 # (case/"The"/"&"-insensitive, trailing citation noise ignored) using an exact
 # match. Omit this key to use the built-in default (Financial Times FT50 unioned
