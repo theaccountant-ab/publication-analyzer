@@ -91,6 +91,27 @@ def test_lookup_working_paper_is_not_a_journal_article():
     assert not match.is_journal_article
 
 
+def test_lookup_retries_on_throttle_then_matches(monkeypatch):
+    """A 429 must be retried, not treated as 'no publication found'."""
+    import urllib.error
+    import publication_analyzer.openalex as oa
+
+    monkeypatch.setattr(oa.time, "sleep", lambda s: None)
+    monkeypatch.setattr(oa, "_pace", lambda: None)
+    payload = {"results": [_work("Asset Pricing with Frictions", "Journal of Finance", "journal")]}
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+        return payload
+
+    match = lookup_publication("Asset Pricing with Frictions", fetch=flaky)
+    assert calls["n"] == 2                  # retried after the 429
+    assert match is not None and match.is_journal_article
+
+
 def test_lookup_uses_authors_to_disambiguate():
     payload = {"results": [
         _work("Common Title", "Journal of Banking", "journal", authors=["Alice Brown"]),

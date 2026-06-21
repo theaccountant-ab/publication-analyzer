@@ -18,6 +18,7 @@ import json
 import re
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -25,6 +26,20 @@ from difflib import SequenceMatcher
 from typing import Callable, List, Optional
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
+
+# Minimum seconds between OpenAlex requests. OpenAlex throttles bursts (HTTP 429);
+# pacing sequential lookups keeps a large analysis under the limit so matches
+# aren't silently lost. Set the contact email (mailto) to use the faster pool.
+_MIN_REQUEST_INTERVAL = 0.12
+_last_request = 0.0
+
+
+def _pace() -> None:
+    global _last_request
+    wait = _MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request)
+    if wait > 0:
+        time.sleep(wait)
+    _last_request = time.monotonic()
 
 # Accept a candidate only when the normalized titles are at least this similar.
 _TITLE_MATCH_THRESHOLD = 0.90
@@ -110,13 +125,17 @@ def lookup_publication(
     authors: Optional[List[str]] = None,
     mailto: str = "",
     fetch: Callable[[str], dict] = _http_get_json,
-    max_retries: int = 3,
+    max_retries: int = 5,
 ) -> Optional[PublicationMatch]:
     """Find the OpenAlex work best matching ``title`` and report its venue.
 
     Returns ``None`` when no candidate clears the title-similarity (and, if
     given, author-overlap) bar. ``fetch`` is injectable so the network call can
     be stubbed in tests; ``mailto`` joins OpenAlex's polite pool when set.
+
+    Transient fetch failures (notably HTTP 429 rate-limiting) are retried with
+    backoff that honors a ``Retry-After`` header, so a throttled lookup isn't
+    mistaken for "no publication found" — which would silently undercount.
     """
     title = (title or "").strip()
     if not title:
@@ -138,13 +157,20 @@ def lookup_publication(
     data: dict = {}
     for attempt in range(max_retries + 1):
         try:
+            _pace()
             data = fetch(url)
             break
-        except Exception:
+        except Exception as exc:
             if attempt == max_retries:
                 return None
-            time.sleep(delay)
-            delay = min(delay * 2, 10.0)
+            wait = delay
+            # Respect a server-supplied Retry-After on 429/503 when present.
+            if isinstance(exc, urllib.error.HTTPError) and exc.headers:
+                retry_after = exc.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    wait = max(wait, float(retry_after))
+            time.sleep(wait)
+            delay = min(delay * 2, 30.0)
 
     want_title = _normalize_title(title)
     want_surnames = _surnames(authors)
