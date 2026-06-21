@@ -1,4 +1,17 @@
 {
-"Western Finance Association|2020": {"done": 1, "total": 1, "complete": true},
-"Western Finance Association|2021": {"done": 1, "total": 1, "complete": true}
+"Western Finance Association|2020": {
+"complete": true,
+"done": 1,
+"total": 1
+},
+"Western Finance Association|2021": {
+"complete": true,
+"done": 1,
+"total": 1
+},
+"Western Finance Association|2022": {
+"complete": true,
+"done": 4,
+"total": 4
+}
 }
