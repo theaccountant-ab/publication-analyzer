@@ -164,11 +164,13 @@ def lookup_publication(
             if attempt == max_retries:
                 return None
             wait = delay
-            # Respect a server-supplied Retry-After on 429/503 when present.
+            # Respect a server-supplied Retry-After on 429/503, but cap it: a
+            # hard-throttled IP can return a multi-hour Retry-After, and we must
+            # fail fast rather than hang the whole run on one sleep.
             if isinstance(exc, urllib.error.HTTPError) and exc.headers:
                 retry_after = exc.headers.get("Retry-After")
                 if retry_after and retry_after.isdigit():
-                    wait = max(wait, float(retry_after))
+                    wait = max(wait, min(float(retry_after), 60.0))
             time.sleep(wait)
             delay = min(delay * 2, 30.0)
 
