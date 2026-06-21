@@ -20,7 +20,7 @@ on:
     inputs:
       branch:
         description: Branch whose data/ to update
-        default: claude/youthful-archimedes-xr4avp
+        default: main
 
 permissions:
   contents: write
@@ -33,11 +33,11 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     env:
-      TARGET_BRANCH: ${{ github.event.inputs.branch || 'claude/youthful-archimedes-xr4avp' }}
+      TARGET_BRANCH: ${{ github.event.inputs.branch || 'main' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch || 'claude/youthful-archimedes-xr4avp' }}
+          ref: ${{ github.event.inputs.branch || 'main' }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
