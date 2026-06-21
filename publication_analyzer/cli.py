@@ -22,8 +22,17 @@ import os
 import sys
 from typing import Dict, List, Optional
 
+from dataclasses import asdict
+
 from .analysis import analyze_program, recent_years
 from .config import Config, load_config
+from .openalex import (
+    OpenAlexUnavailable,
+    PublicationMatch,
+    _normalize_title,
+    _surnames,
+    lookup_publication,
+)
 from .programs import (
     Paper,
     dedupe_papers,
@@ -211,6 +220,56 @@ def cmd_scrape(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cache_key(title: str, authors) -> str:
+    """Key a paper for the OpenAlex cache by normalized title + author surnames.
+
+    Independent of which conference (or presented year) it came from, so the same
+    paper appearing in several conferences is looked up only once.
+    """
+    surnames = "|".join(sorted(_surnames(authors)))
+    return f"{_normalize_title(title)}::{surnames}"
+
+
+def _load_cache(path):
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh) or {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_cache(path, cache) -> None:
+    if path:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, sort_keys=True)
+
+
+def _make_cached_lookup(cache: dict, stats: dict, base_lookup=lookup_publication):
+    """Wrap ``lookup_publication`` with a persistent cache.
+
+    A cached entry is the matched work's fields, or ``None`` for a confirmed
+    no-match — both are reused. A failed fetch (``OpenAlexUnavailable``) is NOT
+    cached, so it is retried on a later run instead of being frozen as "no match".
+    """
+    def cached(title, *, year=None, authors=None, mailto=""):
+        key = _cache_key(title, authors)
+        if key in cache:
+            stats["hits"] += 1
+            entry = cache[key]
+            return PublicationMatch(**entry) if entry else None
+        try:
+            match = base_lookup(title, year=year, authors=authors, mailto=mailto)
+        except OpenAlexUnavailable:
+            stats["failed"] += 1
+            return None
+        stats["lookups"] += 1
+        cache[key] = asdict(match) if match else None
+        return match
+    return cached
+
+
 def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
     from google.genai import errors
 
@@ -259,12 +318,18 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
                 print(f"  ! {name}: program discovery failed: {exc}")
                 programs[name] = []
 
+    # Persistent OpenAlex cache: each paper is resolved once and reused, so the
+    # same paper across conferences (and across daily re-runs) isn't re-queried.
+    cache = _load_cache(args.cache)
+    stats = {"hits": 0, "lookups": 0, "failed": 0}
+    cached_lookup = _make_cached_lookup(cache, stats)
+
     analyses = []
     tot_presented = tot_top = tot_pub = 0
     for conference, papers in programs.items():
         analysis = analyze_program(
             papers, conference=conference, years=years,
-            top_tier=top_tier, mailto=config.mailto,
+            top_tier=top_tier, mailto=config.mailto, lookup=cached_lookup,
         )
         analyses.append(analysis)
         frac = analysis.top_tier_fraction
@@ -278,6 +343,18 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
         tot_presented += analysis.total_presented
         tot_top += analysis.top_tier_papers
         tot_pub += analysis.published_in_journal
+
+    _save_cache(args.cache, cache)
+    if args.cache:
+        print(
+            f"\nOpenAlex cache: {stats['hits']} reused, {stats['lookups']} new "
+            f"lookup(s), {stats['failed']} unreachable (will retry next run)."
+        )
+        if stats["failed"]:
+            print(
+                "  ! Some lookups couldn't reach OpenAlex (rate limit); their "
+                "papers show as unmatched for now. Re-run later to resolve them."
+            )
 
     overall = (tot_top / tot_presented) if tot_presented else None
     overall_str = "n/a" if overall is None else f"{overall:.1%}"
@@ -406,6 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--details", default=None,
         help="Optional CSV path to write a per-paper audit trail to (each paper "
         "and exactly what it matched in OpenAlex: journal, work URL, similarity).",
+    )
+    p.add_argument(
+        "--cache", default=None,
+        help="Optional JSON path for a persistent OpenAlex lookup cache. Papers "
+        "resolved once are reused across conferences and re-runs (failed fetches "
+        "are not cached, so they retry later).",
     )
 
     s = sub.add_parser(

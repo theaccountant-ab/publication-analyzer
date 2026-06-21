@@ -372,6 +372,35 @@ def test_write_details_csv_has_per_paper_audit_rows(tmp_path):
     assert rows[1]["matched"] == "False" and rows[1]["journal"] == ""
 
 
+def test_cached_lookup_reuses_matches_and_skips_failures():
+    from publication_analyzer.cli import _make_cached_lookup, _cache_key
+    from publication_analyzer.openalex import PublicationMatch, OpenAlexUnavailable
+
+    cache, stats = {}, {"hits": 0, "lookups": 0, "failed": 0}
+    calls = {"n": 0}
+
+    def base(title, *, year=None, authors=None, mailto=""):
+        calls["n"] += 1
+        return PublicationMatch("W1", "T", "article", "Journal of Finance",
+                                "journal", 2022, 1.0)
+
+    look = _make_cached_lookup(cache, stats, base_lookup=base)
+    m1 = look("Some Paper", authors=["Ann Bee"])
+    m2 = look("Some Paper", authors=["Ann Bee"])     # same paper -> cache hit
+    assert calls["n"] == 1                            # base called only once
+    assert stats == {"hits": 1, "lookups": 1, "failed": 0}
+    assert m1.source_name == m2.source_name == "Journal of Finance"
+
+    # A failed fetch is not cached, so it can be retried on a later run.
+    def boom(title, *, year=None, authors=None, mailto=""):
+        raise OpenAlexUnavailable("429")
+
+    look_fail = _make_cached_lookup(cache, stats, base_lookup=boom)
+    assert look_fail("Unreachable Paper") is None
+    assert stats["failed"] == 1
+    assert _cache_key("Unreachable Paper", None) not in cache
+
+
 def test_dedupe_fills_missing_fields():
     kept = dedupe_papers([
         Paper("Same Title", authors=[], year=None),

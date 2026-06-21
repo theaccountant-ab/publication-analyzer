@@ -27,6 +27,14 @@ from typing import Callable, List, Optional
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 
+
+class OpenAlexUnavailable(Exception):
+    """Raised when OpenAlex can't be reached (e.g. sustained rate-limiting).
+
+    Distinct from a successful lookup that simply found no match, so callers can
+    retry later instead of caching the failure as "not published".
+    """
+
 # Minimum seconds between OpenAlex requests. OpenAlex throttles bursts (HTTP 429);
 # pacing sequential lookups keeps a large analysis under the limit so matches
 # aren't silently lost. Set the contact email (mailto) to use the faster pool.
@@ -135,7 +143,9 @@ def lookup_publication(
 
     Transient fetch failures (notably HTTP 429 rate-limiting) are retried with
     backoff that honors a ``Retry-After`` header, so a throttled lookup isn't
-    mistaken for "no publication found" — which would silently undercount.
+    mistaken for "no publication found" — which would silently undercount. If
+    every retry fails, ``OpenAlexUnavailable`` is raised rather than returning
+    ``None``, so the caller can tell "couldn't reach OpenAlex" from "no match".
     """
     title = (title or "").strip()
     if not title:
@@ -162,7 +172,7 @@ def lookup_publication(
             break
         except Exception as exc:
             if attempt == max_retries:
-                return None
+                raise OpenAlexUnavailable(str(exc)) from exc
             wait = delay
             # Respect a server-supplied Retry-After on 429/503, but cap it: a
             # hard-throttled IP can return a multi-hour Retry-After, and we must

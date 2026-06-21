@@ -124,11 +124,16 @@ def test_lookup_uses_authors_to_disambiguate():
     assert match.source_name == "Journal of Finance"
 
 
-def test_lookup_returns_none_on_fetch_error():
+def test_lookup_raises_when_openalex_unreachable():
+    from publication_analyzer.openalex import OpenAlexUnavailable
+
     def boom(url):
         raise RuntimeError("network down")
 
-    assert lookup_publication("Anything", fetch=boom, max_retries=0) is None
+    # A failed fetch must be distinguishable from a genuine "no match" (None),
+    # so callers/caches don't record the failure as "not published".
+    with pytest.raises(OpenAlexUnavailable):
+        lookup_publication("Anything", fetch=boom, max_retries=0)
 
 
 def test_normalize_title_folds_ligatures():
