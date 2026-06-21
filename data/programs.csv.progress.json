@@ -1,4 +1,19 @@
 {
+"European Finance Association|2020": {
+"complete": true,
+"done": 6,
+"total": 6
+},
+"European Finance Association|2021": {
+"complete": true,
+"done": 5,
+"total": 5
+},
+"European Finance Association|2022": {
+"complete": false,
+"done": 2,
+"total": 6
+},
 "Western Finance Association|2020": {
 "complete": true,
 "done": 1,
@@ -13,5 +28,15 @@
 "complete": true,
 "done": 4,
 "total": 4
+},
+"Western Finance Association|2023": {
+"complete": true,
+"done": 4,
+"total": 4
+},
+"Western Finance Association|2024": {
+"complete": true,
+"done": 5,
+"total": 5
 }
 }
