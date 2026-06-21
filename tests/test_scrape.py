@@ -343,6 +343,35 @@ def test_scrape_to_programs_resumes_partial_page_mid_chunk(tmp_path, capsys):
     assert json.loads(prog.read_text())["AFA|2024"]["complete"] is True
 
 
+def test_write_details_csv_has_per_paper_audit_rows(tmp_path):
+    import csv
+    from publication_analyzer.cli import _write_details_csv
+    from publication_analyzer.analysis import PublicationAnalysis, PaperOutcome
+
+    a = PublicationAnalysis(conference="WFA", years=[2020])
+    a.outcomes.append(PaperOutcome(
+        title="Some Title", year=2020, matched=True, source_type="journal",
+        journal="Journal of Finance", is_top_tier=True, authors=["Ann Bee"],
+        matched_title="Some Title", openalex_id="https://openalex.org/W1",
+        publication_year=2021, title_similarity=0.98,
+    ))
+    a.outcomes.append(PaperOutcome(
+        title="Unmatched", year=2020, matched=False, source_type=None,
+        journal=None, is_top_tier=False,
+    ))
+    out = tmp_path / "details.csv"
+    _write_details_csv(str(out), [a])
+
+    rows = list(csv.DictReader(open(out)))
+    assert len(rows) == 2
+    assert rows[0]["conference"] == "WFA"
+    assert rows[0]["journal"] == "Journal of Finance"
+    assert rows[0]["openalex_id"].endswith("W1")
+    assert rows[0]["is_top_tier"] == "True"
+    assert rows[0]["authors"] == "Ann Bee"
+    assert rows[1]["matched"] == "False" and rows[1]["journal"] == ""
+
+
 def test_dedupe_fills_missing_fields():
     kept = dedupe_papers([
         Paper("Same Title", authors=[], year=None),

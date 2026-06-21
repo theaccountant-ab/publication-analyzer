@@ -64,14 +64,16 @@ jobs:
           PA_MAILTO: ${{ secrets.PA_MAILTO }}
         run: |
           python -m publication_analyzer -c config.ci.yaml \
-            analyze --programs data/programs.csv --output data/rates.csv
+            analyze --programs data/programs.csv \
+            --output data/rates.csv --details data/paper_details.csv
 
       - name: Commit & push updates
         if: always()   # commit whatever was scraped, even if a step later failed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/programs.csv data/programs.csv.progress.json data/rates.csv
+          git add data/programs.csv data/programs.csv.progress.json \
+            data/rates.csv data/paper_details.csv
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else

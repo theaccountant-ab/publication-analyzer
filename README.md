@@ -146,6 +146,17 @@ an overall line. With `--output` it writes a per-conference CSV
 (`total_presented`, `matched_in_openalex`, `published_in_journal`,
 `top_tier_papers`, `top_tier_fraction`).
 
+With `--details PATH` it also writes a **per-paper audit trail** — one row per
+presented paper showing exactly what it matched in OpenAlex, so results can be
+checked by hand: `conference, year, title, authors, matched, title_similarity,
+matched_title, openalex_id, source_type, journal, publication_year,
+is_top_tier`. Open an `openalex_id` URL to see the matched work directly.
+
+```bash
+python -m publication_analyzer analyze --programs programs.csv \
+  --output rates.csv --details paper_details.csv
+```
+
 ## Configure
 
 A Gemini API key is needed for **scraping** and **search-based discovery** (both

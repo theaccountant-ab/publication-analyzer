@@ -143,6 +143,13 @@ class PaperOutcome:
     source_type: Optional[str]       # OpenAlex venue type: journal/repository/...
     journal: Optional[str]           # journal name, set only if published in one
     is_top_tier: bool
+    # Audit trail: what (if anything) the paper was matched to in OpenAlex, so a
+    # result can be checked by hand. Empty/None when there was no match.
+    authors: List[str] = field(default_factory=list)
+    matched_title: Optional[str] = None
+    openalex_id: Optional[str] = None
+    publication_year: Optional[int] = None
+    title_similarity: Optional[float] = None
 
 
 @dataclass
@@ -222,6 +229,11 @@ def analyze_program(
                 source_type=match.source_type if match else None,
                 journal=journal,
                 is_top_tier=is_top_tier_journal(journal, top_tier),
+                authors=list(paper.authors or []),
+                matched_title=match.matched_title if match else None,
+                openalex_id=match.openalex_id if match else None,
+                publication_year=match.publication_year if match else None,
+                title_similarity=match.title_similarity if match else None,
             )
         )
     return analysis

@@ -206,6 +206,35 @@ def test_analyze_program_counts_and_fraction():
     assert analysis.top_tier_fraction == 0.25      # 1 of 4 presented
 
 
+def test_analyze_program_records_audit_detail():
+    papers = [
+        Paper("Top paper", authors=["Jane Smith"], year=2024),
+        Paper("Never found", year=2024),
+    ]
+
+    def fake_lookup(title, *, year=None, authors=None, mailto=""):
+        if title == "Top paper":
+            return PublicationMatch(
+                "https://openalex.org/W1", "Top Paper (published)", "article",
+                "Journal of Finance", "journal", 2025, 0.99,
+            )
+        return None
+
+    a = analyze_program(papers, conference="C", years=[2024], lookup=fake_lookup)
+    top, miss = a.outcomes
+    # The matched paper carries the full OpenAlex audit trail.
+    assert top.matched and top.is_top_tier
+    assert top.openalex_id == "https://openalex.org/W1"
+    assert top.matched_title == "Top Paper (published)"
+    assert top.journal == "Journal of Finance"
+    assert top.publication_year == 2025
+    assert top.title_similarity == 0.99
+    assert top.authors == ["Jane Smith"]
+    # The unmatched paper has empty match fields.
+    assert not miss.matched
+    assert miss.openalex_id is None and miss.matched_title is None
+
+
 def test_fraction_is_none_for_empty_program():
     analysis = PublicationAnalysis(conference="Empty", years=[2025])
     assert analysis.total_presented == 0

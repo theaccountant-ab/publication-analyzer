@@ -315,7 +315,44 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
                     a.error,
                 ])
         print(f"\nWrote per-conference results to {args.output}.")
+
+    if getattr(args, "details", None):
+        _write_details_csv(args.details, analyses)
+        print(f"Wrote per-paper audit detail to {args.details}.")
     return 0
+
+
+def _write_details_csv(path: str, analyses) -> None:
+    """Write one row per presented paper with its full OpenAlex match detail.
+
+    This is the audit trail for checking results by hand: each row shows the
+    scraped paper (conference, year, title, authors) and exactly what it was
+    matched to in OpenAlex (matched title, work URL, journal, publication year,
+    title similarity) and whether that counted as top-tier.
+    """
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            ["conference", "year", "title", "authors", "matched",
+             "title_similarity", "matched_title", "openalex_id", "source_type",
+             "journal", "publication_year", "is_top_tier"]
+        )
+        for a in analyses:
+            for o in a.outcomes:
+                writer.writerow([
+                    a.conference,
+                    o.year or "",
+                    o.title,
+                    "; ".join(o.authors),
+                    o.matched,
+                    "" if o.title_similarity is None else o.title_similarity,
+                    o.matched_title or "",
+                    o.openalex_id or "",
+                    o.source_type or "",
+                    o.journal or "",
+                    o.publication_year or "",
+                    o.is_top_tier,
+                ])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -364,6 +401,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--output", default=None,
         help="Optional CSV path to write per-conference results to.",
+    )
+    p.add_argument(
+        "--details", default=None,
+        help="Optional CSV path to write a per-paper audit trail to (each paper "
+        "and exactly what it matched in OpenAlex: journal, work URL, similarity).",
     )
 
     s = sub.add_parser(
