@@ -27,6 +27,15 @@ class Config:
     # Contact email for OpenAlex's "polite pool" (optional but recommended for
     # faster, more reliable responses). Set via PA_MAILTO or the YAML `mailto`.
     mailto: str = ""
+    # How to fetch program pages when scraping: "auto" renders via a headless
+    # browser only when a page looks JS-rendered, "always" renders every page,
+    # "never" uses plain HTTP. Set via PA_RENDER or the YAML `render`.
+    render: str = "auto"
+    # Cap on Gemini requests per minute, to stay under the API's rate limit.
+    # The free tier allows only ~5 requests/minute, so without throttling a
+    # large scrape burns through its retries on 429s and aborts. 0 disables the
+    # throttle. Set via PA_RATE_LIMIT_RPM or the YAML `rate_limit_rpm`.
+    rate_limit_rpm: float = 0.0
 
 
 def _env(name: str, default: str = "") -> str:
@@ -51,4 +60,8 @@ def load_config(path: Optional[str] = None) -> Config:
         model=_env("PA_MODEL", data.get("model", "gemini-2.5-flash")),
         top_tier_journals=list(data.get("top_tier_journals", []) or []),
         mailto=_env("PA_MAILTO", data.get("mailto", "")),
+        render=_env("PA_RENDER", data.get("render", "auto")),
+        rate_limit_rpm=float(
+            _env("PA_RATE_LIMIT_RPM", str(data.get("rate_limit_rpm", 0) or 0))
+        ),
     )

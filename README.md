@@ -69,6 +69,61 @@ The two-step form is recommended: scraping is the lossy part, so writing
 programs need the optional `pypdf` dependency (in `requirements.txt`); HTML needs
 nothing extra.
 
+#### Rate limits and resuming (free tier)
+
+Each program page is parsed by Gemini, and large programs are split into several
+chunks — so a multi-conference scrape makes many API calls. The free Gemini tier
+allows only ~5 requests/minute, which a burst will blow through (you'll see HTTP
+429s and the run aborts). Two settings make a free-tier scrape practical:
+
+- **Throttle** with `rate_limit_rpm` (config) or `PA_RATE_LIMIT_RPM` (env) to cap
+  calls per minute — e.g. `4` to stay under the free tier's 5/min.
+- **Resume** (per chunk): `scrape` appends papers to the output CSV as each chunk
+  is parsed and records progress in a sidecar `<output>.progress.json`. If a run
+  stops (rate limit, network), just re-run the same command: finished pages are
+  skipped and a partially-parsed page continues from its next chunk — so a page
+  bigger than a day's quota still completes over several runs instead of
+  restarting and wasting calls. Delete the output CSV *and* its `.progress.json`
+  for a fresh scrape.
+
+On the free tier's hard daily cap (~20 requests/day for `gemini-2.5-flash`), a
+large source list naturally fills in over several days of repeated runs;
+`scripts/daily_update.sh` runs one such pass and commits the new rows.
+
+```bash
+PA_RATE_LIMIT_RPM=4 python -m publication_analyzer scrape sources.csv -o programs.csv
+# ... if it stops on a rate limit, re-run the exact same line to resume:
+PA_RATE_LIMIT_RPM=4 python -m publication_analyzer scrape sources.csv -o programs.csv
+```
+
+#### JavaScript-rendered program pages
+
+Many conference sites build the program list with client-side JavaScript, so a
+plain fetch sees only a `Loading…` shell. To handle these, the scraper can render
+the page in a headless browser first. It's an optional dependency:
+
+```bash
+pip install -r requirements-render.txt
+playwright install chromium   # one-time browser download
+```
+
+Rendering is controlled by `--render` (on both `scrape` and `analyze --scrape`),
+or the `render:` config key / `PA_RENDER` env var:
+
+- `auto` *(default)* — fetch statically, and re-fetch through the browser only
+  when the page looks unrendered (a `Loading…`/"enable JavaScript" placeholder or
+  suspiciously little text). If `playwright` isn't installed, it prints a hint and
+  falls back to the static fetch.
+- `always` — render every page (slower; use when `auto` guesses wrong).
+- `never` — plain HTTP only (the original behavior).
+
+```bash
+python -m publication_analyzer scrape sources.csv -o programs.csv --render auto
+```
+
+PDFs are never rendered (there's nothing to run), so mixing PDF and JS pages in
+one `sources.csv` is fine.
+
 ## Use
 
 ```bash
@@ -104,6 +159,11 @@ model: gemini-2.5-flash
 
 # Contact email for OpenAlex's faster "polite pool" (optional). Also PA_MAILTO.
 mailto: you@example.com
+
+# How to fetch program pages when scraping: auto (default) | always | never.
+# "auto" renders JS-heavy pages in a headless browser only when needed. Also
+# PA_RENDER or --render. See "JavaScript-rendered program pages" above.
+render: auto
 
 # Journals counted as "top-tier". Names are matched after normalization
 # (case-insensitive; "The" prefix, "&"/"and", and trailing citation noise

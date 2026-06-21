@@ -1,10 +1,12 @@
 import pytest
 
+import publication_analyzer.scrape as scrape_mod
 from publication_analyzer.programs import Paper, dedupe_papers
 from publication_analyzer.scrape import (
     chunk_text,
     fetch_text,
     html_to_text,
+    make_fetcher,
     read_scrape_sources,
     scrape_program,
 )
@@ -123,6 +125,222 @@ def test_read_scrape_sources_requires_columns(tmp_path):
     bad.write_text("conference,year\nAFA,2024\n", encoding="utf-8")
     with pytest.raises(ValueError):
         read_scrape_sources(str(bad))
+
+
+def test_make_fetcher_modes():
+    assert make_fetcher("never") is scrape_mod._default_fetch
+    assert make_fetcher("always") is scrape_mod._render_fetch
+    assert make_fetcher("auto") is scrape_mod._auto_fetch
+    assert make_fetcher("anything-else") is scrape_mod._auto_fetch  # defaults to auto
+
+
+def test_looks_unrendered_detects_placeholder_and_thin_pages():
+    assert scrape_mod._looks_unrendered("Loading...")
+    assert scrape_mod._looks_unrendered("Please enable JavaScript to view this.")
+    assert scrape_mod._looks_unrendered("tiny")
+    # A page with real content and no placeholder is considered rendered.
+    assert not scrape_mod._looks_unrendered("A real paper title and authors. " * 40)
+
+
+def test_auto_fetch_renders_when_static_is_unrendered(monkeypatch):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"<div>Loading...</div>", "text/html"),
+    )
+    rendered = b"<li>Real Paper by A. Author</li>" * 30
+    monkeypatch.setattr(
+        scrape_mod, "_render_fetch",
+        lambda url, *, timeout=30.0: (rendered, "text/html"),
+    )
+    data, content_type = scrape_mod._auto_fetch("http://x/prog")
+    assert data == rendered and content_type == "text/html"
+
+
+def test_auto_fetch_keeps_static_when_page_is_rich(monkeypatch):
+    rich = ("<li>Paper " + "x" * 50 + "</li>").encode() * 20
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (rich, "text/html"),
+    )
+    called = {"render": False}
+
+    def boom(url, *, timeout=30.0):
+        called["render"] = True
+        return b"", "text/html"
+
+    monkeypatch.setattr(scrape_mod, "_render_fetch", boom)
+    data, _ = scrape_mod._auto_fetch("http://x/prog")
+    assert data == rich and not called["render"]
+
+
+def test_auto_fetch_does_not_render_pdfs(monkeypatch):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"%PDF-1.4", "application/pdf"),
+    )
+    called = {"render": False}
+    monkeypatch.setattr(
+        scrape_mod, "_render_fetch",
+        lambda *a, **k: called.__setitem__("render", True) or (b"", "text/html"),
+    )
+    data, content_type = scrape_mod._auto_fetch("http://x/agenda.pdf")
+    assert content_type == "application/pdf" and not called["render"]
+
+
+def test_auto_fetch_falls_back_when_render_unavailable(monkeypatch, capsys):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"<div>Loading...</div>", "text/html"),
+    )
+
+    def missing(url, *, timeout=30.0):
+        raise RuntimeError("JS rendering requires 'playwright'")
+
+    monkeypatch.setattr(scrape_mod, "_render_fetch", missing)
+    data, _ = scrape_mod._auto_fetch("http://x/prog")
+    assert data == b"<div>Loading...</div>"            # kept the static body
+    assert "cannot render" in capsys.readouterr().out  # warned the user
+
+
+def test_render_fetch_delegates_pdfs_without_a_browser(monkeypatch):
+    monkeypatch.setattr(
+        scrape_mod, "_default_fetch",
+        lambda url, *, timeout=30.0: (b"%PDF-1.4", "application/pdf"),
+    )
+    data, content_type = scrape_mod._render_fetch("http://x/agenda.PDF?v=1")
+    assert content_type == "application/pdf"
+
+
+def test_set_rate_limit_throttles_calls(monkeypatch):
+    import publication_analyzer.programs as programs_mod
+
+    clock = {"t": 100.0}
+    slept = []
+    monkeypatch.setattr(programs_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(programs_mod.time, "sleep", lambda s: slept.append(s))
+    try:
+        programs_mod.set_rate_limit(5)  # 5/min -> one call every 12s
+        programs_mod._throttle()        # first call: no wait, stamps t=100
+        clock["t"] = 104.0              # only 4s elapsed before the next call
+        programs_mod._throttle()        # must wait the remaining 8s
+        assert slept == [pytest.approx(8.0)]
+    finally:
+        programs_mod.set_rate_limit(0)  # disable so other tests are unaffected
+
+
+def test_set_rate_limit_zero_disables_throttle(monkeypatch):
+    import publication_analyzer.programs as programs_mod
+
+    slept = []
+    monkeypatch.setattr(programs_mod.time, "sleep", lambda s: slept.append(s))
+    programs_mod.set_rate_limit(0)
+    programs_mod._throttle()
+    programs_mod._throttle()
+    assert slept == []
+
+
+def _html_fetcher(body: bytes):
+    return lambda url: (body, "text/html")
+
+
+def test_scrape_to_programs_resumes_finished_page(tmp_path, capsys):
+    import json
+    from publication_analyzer import cli
+    import publication_analyzer.cli as cli_mod
+
+    sources = tmp_path / "sources.csv"
+    sources.write_text(
+        "conference,year,url\n"
+        "AFA,2023,http://a/2023\n"
+        "AFA,2024,http://a/2024\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "programs.csv"
+    out.write_text(
+        "conference,year,title,authors\nAFA,2023,Old Paper,Jane Smith\n",
+        encoding="utf-8",
+    )
+    # Sidecar marks AFA 2023 fully scraped (one chunk done).
+    (tmp_path / "programs.csv.progress.json").write_text(
+        json.dumps({"AFA|2023": {"done": 1, "total": 1, "complete": True}}),
+        encoding="utf-8",
+    )
+
+    parsed_for = []
+
+    def fake_parse(client, model, text, **kw):
+        parsed_for.append(text)
+        return [Paper(title="New Paper")]
+
+    cli_mod.parse_program_text = fake_parse
+    try:
+        cli._scrape_to_programs(
+            None, "model", str(sources), fetch=_html_fetcher(b"<li>x</li>"),
+            output=str(out),
+        )
+    finally:
+        from publication_analyzer.programs import parse_program_text as real
+        cli_mod.parse_program_text = real
+
+    # The finished page was skipped (parsed once, for 2024 only).
+    assert len(parsed_for) == 1
+    text = out.read_text(encoding="utf-8")
+    assert "Old Paper" in text and "New Paper" in text
+    assert "skip AFA 2023" in capsys.readouterr().out
+
+
+def test_scrape_to_programs_resumes_partial_page_mid_chunk(tmp_path, capsys):
+    """A page stopped mid-way resumes from the next unparsed chunk."""
+    import json
+    from google.genai import errors
+    from publication_analyzer import cli
+    import publication_analyzer.cli as cli_mod
+
+    sources = tmp_path / "sources.csv"
+    sources.write_text("conference,year,url\nAFA,2024,http://a/2024\n",
+                       encoding="utf-8")
+    out = tmp_path / "programs.csv"
+    prog = tmp_path / "programs.csv.progress.json"
+
+    # A body that chunk_text (max_chars=20) splits into several chunks.
+    body = ("\n".join(f"line {i}" for i in range(20))).encode()
+
+    seen = []
+
+    def fail_on_third(client, model, text, **kw):
+        seen.append(text)
+        if len(seen) == 3:
+            raise errors.ClientError(429, {"error": {"message": "quota"}}, None)
+        return [Paper(title=f"P{len(seen)}")]
+
+    cli_mod.parse_program_text = fail_on_third
+    try:
+        cli._scrape_to_programs(
+            None, "model", str(sources), fetch=_html_fetcher(body),
+            output=str(out), max_chars=20,
+        )
+        # First run: two chunks saved before the 429 on the third.
+        assert "quota/rate limit reached" in capsys.readouterr().out
+        state = json.loads(prog.read_text())["AFA|2024"]
+        assert state["done"] == 2 and state["complete"] is False
+
+        # Resume: parsing succeeds now; it must start at chunk index 2, not 0.
+        seen.clear()
+        def succeed(client, model, text, **kw):
+            seen.append(text)
+            return [Paper(title=f"R{len(seen)}")]
+        cli_mod.parse_program_text = succeed
+        cli._scrape_to_programs(
+            None, "model", str(sources), fetch=_html_fetcher(body),
+            output=str(out), max_chars=20,
+        )
+    finally:
+        from publication_analyzer.programs import parse_program_text as real
+        cli_mod.parse_program_text = real
+
+    # The resume reported "2/N already done" and finished the page.
+    assert "resume AFA 2024: 2/" in capsys.readouterr().out
+    assert json.loads(prog.read_text())["AFA|2024"]["complete"] is True
 
 
 def test_dedupe_fills_missing_fields():

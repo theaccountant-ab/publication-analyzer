@@ -28,6 +28,13 @@ _USER_AGENT = (
     "Mozilla/5.0 (compatible; publication-analyzer/1.0; +https://openalex.org)"
 )
 
+# Default chunk size and output budget for a single parse. Larger chunks mean
+# fewer API calls per program (each call is rate-limited / quota-capped), and the
+# extracted paper list is compact JSON, so a generous output budget comfortably
+# covers even a dense chunk without truncation.
+DEFAULT_MAX_CHARS = 24000
+DEFAULT_MAX_OUTPUT_TOKENS = 16000
+
 # Fetcher returns (raw_bytes, content_type). Isolated so tests can inject one.
 Fetcher = Callable[[str], Tuple[bytes, str]]
 
@@ -94,11 +101,92 @@ def _default_fetch(url: str, *, timeout: float = 30.0) -> Tuple[bytes, str]:
         return resp.read(), resp.headers.get_content_type()
 
 
+# Substrings that betray a page whose program list is injected by client-side
+# JavaScript: the static HTML shows only a placeholder. Matched case-insensitively.
+_RENDER_PLACEHOLDERS = (
+    "loading…",
+    "loading...",
+    "please enable javascript",
+    "javascript is required",
+    "enable javascript to",
+)
+
+
+def _is_pdf(url: str, content_type: Optional[str] = None) -> bool:
+    return content_type == "application/pdf" or url.lower().split("?")[0].endswith(".pdf")
+
+
+def _looks_unrendered(text: str, *, min_chars: int = 600) -> bool:
+    """True if extracted text suggests the real content is JS-rendered.
+
+    Two signals: a known "loading"/"enable JavaScript" placeholder, or so little
+    text that the page almost certainly hasn't populated its content yet.
+    """
+    low = text.lower()
+    if any(ph in low for ph in _RENDER_PLACEHOLDERS):
+        return True
+    return len(text.strip()) < min_chars
+
+
+def _render_fetch(url: str, *, timeout: float = 30.0) -> Tuple[bytes, str]:
+    """Fetch ``url`` through a headless browser so client-side JS runs first.
+
+    Returns the *rendered* HTML, letting the normal HTML path extract a program
+    that a plain GET would miss. Requires the optional ``playwright`` package and
+    its browser binaries (``pip install playwright && playwright install
+    chromium``). PDFs have nothing to render, so they fall back to a plain fetch.
+    """
+    if _is_pdf(url):
+        return _default_fetch(url, timeout=timeout)
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - exercised only without playwright
+        raise RuntimeError(
+            "JS rendering requires 'playwright' (pip install playwright && "
+            "playwright install chromium)."
+        ) from exc
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(user_agent=_USER_AGENT)
+            page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+            html = page.content()
+        finally:
+            browser.close()
+    return html.encode("utf-8"), "text/html"
+
+
+def _auto_fetch(url: str, *, timeout: float = 30.0) -> Tuple[bytes, str]:
+    """Fetch statically, then re-fetch via the browser only if it looks needed.
+
+    Most program pages are static; rendering is slow and needs extra binaries, so
+    pay that cost only when the static text looks like an unrendered shell.
+    """
+    data, content_type = _default_fetch(url, timeout=timeout)
+    if _is_pdf(url, content_type):
+        return data, content_type
+    html = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
+    if _looks_unrendered(html_to_text(html)):
+        try:
+            return _render_fetch(url, timeout=timeout)
+        except RuntimeError as exc:
+            print(f"  ! {url} looks JS-rendered but cannot render it: {exc}")
+    return data, content_type
+
+
+def make_fetcher(render: str = "auto") -> Fetcher:
+    """Pick a fetcher by render mode: ``auto`` (default), ``always`` or ``never``."""
+    if render == "always":
+        return _render_fetch
+    if render == "never":
+        return _default_fetch
+    return _auto_fetch
+
+
 def fetch_text(url: str, *, fetch: Fetcher = _default_fetch) -> str:
     """Fetch ``url`` and return its text, handling HTML and PDF content."""
     data, content_type = fetch(url)
-    is_pdf = content_type == "application/pdf" or url.lower().split("?")[0].endswith(".pdf")
-    if is_pdf:
+    if _is_pdf(url, content_type):
         return pdf_to_text(data)
     html = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
     return html_to_text(html)
@@ -134,7 +222,8 @@ def scrape_program(
     year: Optional[int] = None,
     fetch: Fetcher = _default_fetch,
     parse: Optional[Callable[[str], List[Paper]]] = None,
-    max_chars: int = 12000,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> List[Paper]:
     """Fetch program page(s), extract papers, and return a deduplicated list.
 
@@ -142,7 +231,11 @@ def scrape_program(
     any paper whose year the page didn't make explicit. Pages that fail to fetch
     are reported and skipped so one bad URL doesn't sink the run.
     """
-    do_parse = parse or (lambda text: parse_program_text(client, model, text))
+    do_parse = parse or (
+        lambda text: parse_program_text(
+            client, model, text, max_output_tokens=max_output_tokens
+        )
+    )
     papers: List[Paper] = []
     for url in urls:
         try:

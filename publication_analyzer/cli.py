@@ -17,18 +17,39 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .analysis import analyze_program, recent_years
 from .config import Config, load_config
-from .programs import Paper, discover_program_via_search, read_program_csv
-from .scrape import read_scrape_sources, scrape_program
+from .programs import (
+    Paper,
+    dedupe_papers,
+    discover_program_via_search,
+    parse_program_text,
+    read_program_csv,
+    set_rate_limit,
+)
+from .scrape import (
+    DEFAULT_MAX_CHARS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    Fetcher,
+    chunk_text,
+    fetch_text,
+    make_fetcher,
+    read_scrape_sources,
+    scrape_program,
+)
 
 
 def _client(config: Config):
     from google import genai
 
+    # Install the client-side throttle so every Gemini call respects the
+    # configured per-minute cap (important on the rate-limited free tier).
+    set_rate_limit(config.rate_limit_rpm)
     if not config.gemini_api_key:
         # The SDK also reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
         return genai.Client()
@@ -45,44 +66,146 @@ def _read_name_list(path: str) -> List[str]:
     return names
 
 
-def _scrape_to_programs(client, model: str, path: str) -> Dict[str, List[Paper]]:
-    """Scrape every page in a sources CSV into ``{conference: [Paper, ...]}``."""
+def _append_program_csv(path: str, conference: str, papers: List[Paper]) -> None:
+    """Append a conference's papers to the output CSV, writing a header if new."""
+    new_file = not os.path.exists(path)
+    with open(path, "a", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        if new_file:
+            writer.writerow(["conference", "year", "title", "authors"])
+        for p in papers:
+            writer.writerow(
+                [conference, p.year or "", p.title, "; ".join(p.authors)]
+            )
+
+
+def _progress_path(output: Optional[str]) -> Optional[str]:
+    return f"{output}.progress.json" if output else None
+
+
+def _load_progress(path: Optional[str]) -> Dict[str, dict]:
+    """Load per-page chunk progress ``{conference|year: {done, total, complete}}``."""
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh) or {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_progress(path: str, progress: Dict[str, dict]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(progress, fh, indent=0, sort_keys=True)
+
+
+def _scrape_to_programs(
+    client, model: str, path: str, *, fetch: Fetcher,
+    output: Optional[str] = None,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> Dict[str, List[Paper]]:
+    """Scrape every page in a sources CSV into ``{conference: [Paper, ...]}``.
+
+    When ``output`` is given the scrape is *resumable at chunk granularity*: each
+    parsed chunk's papers are appended to the CSV immediately and a sidecar
+    ``<output>.progress.json`` records how many of a page's chunks are done. If
+    the run stops (notably on the free tier's hard daily request cap), re-running
+    skips finished pages and resumes a partial page mid-way — so a page larger
+    than a day's quota still completes over several days instead of restarting
+    (and wasting quota) every time.
+    """
+    from google.genai import errors
+
     sources = read_scrape_sources(path)
     programs: Dict[str, List[Paper]] = {}
+    prog_path = _progress_path(output)
+    progress = _load_progress(prog_path)
     for conference, items in sources.items():
         papers: List[Paper] = []
         for year, url in items:
-            papers.extend(scrape_program(client, model, [url], year=year))
+            key = f"{conference}|{year if year is not None else ''}"
+            state = progress.get(key, {})
+            if state.get("complete"):
+                print(f"  skip {conference} {year or ''}: already scraped.")
+                continue
+            try:
+                chunks = chunk_text(
+                    fetch_text(url, fetch=fetch), max_chars=max_chars
+                )
+            except Exception as exc:  # network / decode / PDF errors
+                print(f"  ! failed to fetch {url}: {exc}")
+                continue
+            start = min(int(state.get("done", 0)), len(chunks))
+            if start:
+                print(
+                    f"  resume {conference} {year or ''}: "
+                    f"{start}/{len(chunks)} chunk(s) already done."
+                )
+            try:
+                for i in range(start, len(chunks)):
+                    found = parse_program_text(
+                        client, model, chunks[i],
+                        max_output_tokens=max_output_tokens,
+                    )
+                    if year is not None:
+                        for p in found:
+                            if p.year is None:
+                                p.year = year
+                    found = dedupe_papers(found)
+                    papers.extend(found)
+                    if output:
+                        _append_program_csv(output, conference, found)
+                    if prog_path:
+                        progress[key] = {
+                            "done": i + 1, "total": len(chunks),
+                            "complete": False,
+                        }
+                        _save_progress(prog_path, progress)
+            except errors.APIError as exc:
+                # A quota / rate-limit error (notably the free tier's daily cap)
+                # can't be waited out. Stop cleanly; finished chunks are saved.
+                if getattr(exc, "code", None) == 429:
+                    print(
+                        f"\n  ! Gemini quota/rate limit reached while scraping "
+                        f"{conference} {year or ''} (at chunk {i + 1}/"
+                        f"{len(chunks)}). Progress saved; re-run the same command "
+                        f"(e.g. tomorrow, once the daily quota resets) to resume."
+                    )
+                    return programs
+                raise
+            if prog_path:  # page fully parsed
+                progress[key] = {
+                    "done": len(chunks), "total": len(chunks), "complete": True,
+                }
+                _save_progress(prog_path, progress)
         programs[conference] = papers
         print(
-            f"  scraped {conference}: {len(papers)} paper(s) "
+            f"  scraped {conference}: {len(papers)} new paper(s) "
             f"from {len(items)} page(s)."
         )
     return programs
 
 
-def _write_program_csv(path: str, programs: Dict[str, List[Paper]]) -> int:
-    rows = 0
-    with open(path, "w", encoding="utf-8", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["conference", "year", "title", "authors"])
-        for conference, papers in programs.items():
-            for p in papers:
-                writer.writerow(
-                    [conference, p.year or "", p.title, "; ".join(p.authors)]
-                )
-                rows += 1
-    return rows
-
-
 def cmd_scrape(config: Config, args: argparse.Namespace) -> int:
     print(f"Scraping conference programs listed in {args.file} ...")
+    if os.path.exists(args.output):
+        print(
+            f"  (resuming: {args.output} exists; finished pages are skipped and "
+            f"a partial page continues mid-way. Delete it and its .progress.json "
+            f"for a fresh scrape.)"
+        )
     client = _client(config)
-    programs = _scrape_to_programs(client, config.model, args.file)
-    n = _write_program_csv(args.output, programs)
+    fetch = make_fetcher(args.render or config.render)
+    programs = _scrape_to_programs(
+        client, config.model, args.file, fetch=fetch, output=args.output
+    )
+    progress = _load_progress(_progress_path(args.output))
+    complete = sum(1 for s in progress.values() if s.get("complete"))
+    n = sum(len(p) for p in programs.values())
     print(
-        f"\nWrote {n} paper(s) across {len(programs)} conference(s) to "
-        f"{args.output}.\nReview it, then run: "
+        f"\nWrote {n} newly-scraped paper(s) to {args.output} "
+        f"({complete} page(s) fully scraped so far).\nReview it, then run: "
         f"publication-analyzer analyze --programs {args.output}"
     )
     return 0
@@ -111,7 +234,10 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
     elif args.scrape:
         print(f"Scraping conference programs listed in {args.scrape} ...")
         client = _client(config)
-        programs = _scrape_to_programs(client, config.model, args.scrape)
+        fetch = make_fetcher(args.render or config.render)
+        programs = _scrape_to_programs(
+            client, config.model, args.scrape, fetch=fetch
+        )
         print()
     else:
         if not args.file:
@@ -230,6 +356,12 @@ def build_parser() -> argparse.ArgumentParser:
         "Used for search-based discovery; ignored when --programs supplies years.",
     )
     p.add_argument(
+        "--render", choices=("auto", "always", "never"), default=None,
+        help="How to fetch pages with --scrape: 'auto' (default) renders via a "
+        "headless browser only when a page looks JS-rendered, 'always' renders "
+        "every page, 'never' uses plain HTTP. Needs the optional 'playwright'.",
+    )
+    p.add_argument(
         "--output", default=None,
         help="Optional CSV path to write per-conference results to.",
     )
@@ -246,6 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "-o", "--output", default="programs.csv",
         help="Program CSV to write (default: programs.csv).",
+    )
+    s.add_argument(
+        "--render", choices=("auto", "always", "never"), default=None,
+        help="How to fetch pages: 'auto' (default) renders via a headless "
+        "browser only when a page looks JS-rendered, 'always' renders every "
+        "page, 'never' uses plain HTTP. Needs the optional 'playwright'.",
     )
     return parser
 
