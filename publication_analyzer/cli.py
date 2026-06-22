@@ -246,12 +246,18 @@ def _save_cache(path, cache) -> None:
             json.dump(cache, fh, sort_keys=True)
 
 
-def _make_cached_lookup(cache: dict, stats: dict, base_lookup=lookup_publication):
-    """Wrap ``lookup_publication`` with a persistent cache.
+def _make_cached_lookup(cache: dict, stats: dict, base_lookup=lookup_publication,
+                        max_lookups=None):
+    """Wrap ``lookup_publication`` with a persistent cache and per-run budget.
 
     A cached entry is the matched work's fields, or ``None`` for a confirmed
     no-match — both are reused. A failed fetch (``OpenAlexUnavailable``) is NOT
     cached, so it is retried on a later run instead of being frozen as "no match".
+
+    ``max_lookups`` bounds how many *fresh attempts* (successes + failures) one run
+    makes against OpenAlex; once reached, remaining uncached papers are deferred
+    (returned as unresolved) for a future run. This keeps each run short enough to
+    finish under OpenAlex's IP rate limit, with the cache healing over runs.
     """
     def cached(title, *, year=None, authors=None, mailto=""):
         key = _cache_key(title, authors)
@@ -259,6 +265,9 @@ def _make_cached_lookup(cache: dict, stats: dict, base_lookup=lookup_publication
             stats["hits"] += 1
             entry = cache[key]
             return PublicationMatch(**entry) if entry else None
+        if max_lookups is not None and (stats["lookups"] + stats["failed"]) >= max_lookups:
+            stats["deferred"] += 1
+            return None
         try:
             match = base_lookup(title, year=year, authors=authors, mailto=mailto)
         except OpenAlexUnavailable:
@@ -321,8 +330,10 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
     # Persistent OpenAlex cache: each paper is resolved once and reused, so the
     # same paper across conferences (and across daily re-runs) isn't re-queried.
     cache = _load_cache(args.cache)
-    stats = {"hits": 0, "lookups": 0, "failed": 0}
-    cached_lookup = _make_cached_lookup(cache, stats)
+    stats = {"hits": 0, "lookups": 0, "failed": 0, "deferred": 0}
+    cached_lookup = _make_cached_lookup(
+        cache, stats, max_lookups=getattr(args, "max_lookups", None)
+    )
 
     analyses = []
     tot_presented = tot_top = tot_pub = 0
@@ -348,12 +359,14 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
     if args.cache:
         print(
             f"\nOpenAlex cache: {stats['hits']} reused, {stats['lookups']} new "
-            f"lookup(s), {stats['failed']} unreachable (will retry next run)."
+            f"lookup(s), {stats['failed']} unreachable, {stats['deferred']} "
+            f"deferred to a later run."
         )
-        if stats["failed"]:
+        if stats["failed"] or stats["deferred"]:
             print(
-                "  ! Some lookups couldn't reach OpenAlex (rate limit); their "
-                "papers show as unmatched for now. Re-run later to resolve them."
+                "  ! Some papers are not yet resolved (rate limit / per-run "
+                "budget); they show as unmatched for now. Re-run to resolve more "
+                "— the cache fills incrementally."
             )
 
     overall = (tot_top / tot_presented) if tot_presented else None
@@ -489,6 +502,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON path for a persistent OpenAlex lookup cache. Papers "
         "resolved once are reused across conferences and re-runs (failed fetches "
         "are not cached, so they retry later).",
+    )
+    p.add_argument(
+        "--max-lookups", type=int, default=None, dest="max_lookups",
+        help="Cap fresh OpenAlex attempts per run (successes+failures); remaining "
+        "uncached papers are deferred to a later run. Keeps a run under OpenAlex's "
+        "rate limit so the cache heals incrementally. Requires --cache.",
     )
 
     s = sub.add_parser(

@@ -401,6 +401,25 @@ def test_cached_lookup_reuses_matches_and_skips_failures():
     assert _cache_key("Unreachable Paper", None) not in cache
 
 
+def test_cached_lookup_defers_past_budget():
+    from publication_analyzer.cli import _make_cached_lookup
+    from publication_analyzer.openalex import PublicationMatch
+
+    cache, stats = {}, {"hits": 0, "lookups": 0, "failed": 0, "deferred": 0}
+    calls = {"n": 0}
+
+    def base(title, *, year=None, authors=None, mailto=""):
+        calls["n"] += 1
+        return PublicationMatch("W", "T", "article", "J", "journal", 2022, 1.0)
+
+    look = _make_cached_lookup(cache, stats, base_lookup=base, max_lookups=2)
+    look("P1"); look("P2")            # two fresh attempts use the budget
+    r3 = look("P3")                    # third is deferred, base not called
+    assert calls["n"] == 2
+    assert stats["lookups"] == 2 and stats["deferred"] == 1
+    assert r3 is None
+
+
 def test_dedupe_fills_missing_fields():
     kept = dedupe_papers([
         Paper("Same Title", authors=[], year=None),
