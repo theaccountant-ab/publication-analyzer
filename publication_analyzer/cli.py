@@ -33,6 +33,7 @@ from .openalex import (
     _surnames,
     lookup_publication,
 )
+from .crossref import lookup_publication as lookup_publication_crossref
 from .programs import (
     Paper,
     dedupe_papers,
@@ -329,10 +330,16 @@ def cmd_analyze(config: Config, args: argparse.Namespace) -> int:
 
     # Persistent OpenAlex cache: each paper is resolved once and reused, so the
     # same paper across conferences (and across daily re-runs) isn't re-queried.
+    base_lookup = (
+        lookup_publication_crossref
+        if getattr(args, "source", "openalex") == "crossref"
+        else lookup_publication
+    )
     cache = _load_cache(args.cache)
     stats = {"hits": 0, "lookups": 0, "failed": 0, "deferred": 0}
     cached_lookup = _make_cached_lookup(
-        cache, stats, max_lookups=getattr(args, "max_lookups", None)
+        cache, stats, base_lookup=base_lookup,
+        max_lookups=getattr(args, "max_lookups", None),
     )
 
     analyses = []
@@ -502,6 +509,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON path for a persistent OpenAlex lookup cache. Papers "
         "resolved once are reused across conferences and re-runs (failed fetches "
         "are not cached, so they retry later).",
+    )
+    p.add_argument(
+        "--source", choices=("openalex", "crossref"), default="openalex",
+        help="Which database to resolve publications against. 'crossref' is a "
+        "fallback when OpenAlex rate-limits your IP (treats SSRN/arXiv as "
+        "non-journal, like OpenAlex).",
     )
     p.add_argument(
         "--max-lookups", type=int, default=None, dest="max_lookups",

@@ -420,6 +420,40 @@ def test_cached_lookup_defers_past_budget():
     assert r3 is None
 
 
+def test_crossref_prefers_journal_over_preprint():
+    from publication_analyzer.crossref import lookup_publication
+
+    # Same title appears as an SSRN preprint and the real journal article.
+    payload = {"message": {"items": [
+        {"DOI": "10.x/ssrn", "title": ["Asset Pricing With Frictions"],
+         "container-title": ["SSRN Electronic Journal"], "type": "journal-article",
+         "issued": {"date-parts": [[2020]]},
+         "author": [{"family": "Smith"}]},
+        {"DOI": "10.x/jfe", "title": ["Asset Pricing With Frictions"],
+         "container-title": ["Journal of Financial Economics"], "type": "journal-article",
+         "issued": {"date-parts": [[2022]]},
+         "author": [{"family": "Smith"}]},
+    ]}}
+    m = lookup_publication("Asset Pricing with Frictions", authors=["Jane Smith"],
+                           fetch=lambda url: payload)
+    assert m is not None
+    assert m.is_journal_article
+    assert m.source_name == "Journal of Financial Economics"   # not the SSRN copy
+
+
+def test_crossref_marks_ssrn_only_as_non_journal():
+    from publication_analyzer.crossref import lookup_publication
+
+    payload = {"message": {"items": [
+        {"DOI": "10.x/ssrn", "title": ["Working Paper Title Here"],
+         "container-title": ["SSRN Electronic Journal"], "type": "journal-article",
+         "issued": {"date-parts": [[2021]]}, "author": [{"family": "Doe"}]},
+    ]}}
+    m = lookup_publication("Working Paper Title Here", authors=["John Doe"],
+                           fetch=lambda url: payload)
+    assert m is not None and not m.is_journal_article   # SSRN is not a journal
+
+
 def test_dedupe_fills_missing_fields():
     kept = dedupe_papers([
         Paper("Same Title", authors=[], year=None),
