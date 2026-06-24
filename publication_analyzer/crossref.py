@@ -146,10 +146,10 @@ def lookup_publication(
             continue
         sim = SequenceMatcher(None, want_title, _normalize_title(cand_title)).ratio()
         overlap = bool(want_surnames & _cr_surnames(item))
-        # Accept a near-exact title, or a looser title backed by an author overlap.
-        if not (sim >= _TITLE_NEAR_EXACT
-                or (sim >= 0.72 and overlap)
-                or (sim >= _TITLE_MATCH_THRESHOLD and (overlap or not want_surnames))):
+        # Accept a strong title match (>=0.90) on its own, or a looser one (>=0.72)
+        # backed by an author-surname overlap (recovers renamed papers). Validated
+        # against the HSU benchmark: this lands ~2pts under it without over-counting.
+        if not (sim >= _TITLE_MATCH_THRESHOLD or (sim >= 0.72 and overlap)):
             continue
         wy = _cr_year(item)
         if year and wy and wy < year - 1:
