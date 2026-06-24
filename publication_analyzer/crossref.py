@@ -84,53 +84,72 @@ def lookup_publication(
     """Find the Crossref work best matching ``title`` and report its venue.
 
     Same contract as ``openalex.lookup_publication``: returns ``None`` for a
-    genuine no-match, raises ``OpenAlexUnavailable`` if Crossref can't be reached,
-    and prefers a real journal version over a preprint at equal title similarity.
+    genuine no-match, raises ``OpenAlexUnavailable`` if Crossref can't be reached.
+
+    Matching uses two queries — by title, and by author+title — then prefers a
+    real journal over a preprint. A candidate is accepted when its title is a
+    near-match (>=0.90), or a looser match (>=0.72) backed by an author-surname
+    overlap. The author-anchored query + looser-with-author rule recover papers
+    whose title changed between the presented working paper and publication (the
+    main reason a strict title search misses real publications).
     """
     title = (title or "").strip()
     if not title:
         return None
 
-    params = {"query.bibliographic": title, "rows": "5",
-              "select": "DOI,title,container-title,type,issued,author"}
-    if mailto:
-        params["mailto"] = mailto
-    url = CROSSREF_WORKS_URL + "?" + urllib.parse.urlencode(params)
-
-    delay = 1.0
-    data: dict = {}
-    for attempt in range(max_retries + 1):
-        try:
-            _pace()
-            data = fetch(url)
-            break
-        except Exception as exc:
-            if attempt == max_retries:
-                raise OpenAlexUnavailable(str(exc)) from exc
-            wait = delay
-            if isinstance(exc, urllib.error.HTTPError) and exc.headers:
-                ra = exc.headers.get("Retry-After")
-                if ra and ra.isdigit():
-                    wait = max(wait, min(float(ra), 60.0))
-            time.sleep(wait)
-            delay = min(delay * 2, 30.0)
-
     want_title = _normalize_title(title)
     want_surnames = _surnames(authors)
 
+    # Two complementary queries: title-only, and author+title (the latter surfaces
+    # the published version even when its title differs from the presented one).
+    sel = "DOI,title,container-title,type,issued,author"
+    queries = [{"query.bibliographic": title, "rows": "8", "select": sel}]
+    if want_surnames:
+        queries.append({"query.author": " ".join(sorted(want_surnames)[:3]),
+                        "query.bibliographic": title, "rows": "8", "select": sel})
+
+    items, reached = [], False
+    for params in queries:
+        if mailto:
+            params["mailto"] = mailto
+        url = CROSSREF_WORKS_URL + "?" + urllib.parse.urlencode(params)
+        delay = 1.0
+        for attempt in range(max_retries + 1):
+            try:
+                _pace()
+                items += (fetch(url).get("message", {}) or {}).get("items", []) or []
+                reached = True
+                break
+            except Exception as exc:
+                if attempt == max_retries:
+                    break  # this query failed; try the other before giving up
+                wait = delay
+                if isinstance(exc, urllib.error.HTTPError) and exc.headers:
+                    ra = exc.headers.get("Retry-After")
+                    if ra and ra.isdigit():
+                        wait = max(wait, min(float(ra), 60.0))
+                time.sleep(wait)
+                delay = min(delay * 2, 30.0)
+    if not reached:
+        raise OpenAlexUnavailable("Crossref unreachable for both queries")
+
     best: Optional[PublicationMatch] = None
-    for item in (data.get("message", {}) or {}).get("items", []) or []:
+    seen = set()
+    for item in items:
+        doi = item.get("DOI", "")
+        if doi and doi in seen:
+            continue
+        seen.add(doi)
         titles = item.get("title") or []
         cand_title = titles[0] if titles else ""
         if not cand_title:
             continue
         sim = SequenceMatcher(None, want_title, _normalize_title(cand_title)).ratio()
-        if sim < _TITLE_MATCH_THRESHOLD:
-            continue
-        near_exact = sim >= _TITLE_NEAR_EXACT and len(want_title.split()) >= 4
-        if want_surnames and not near_exact and not (
-            want_surnames & _cr_surnames(item)
-        ):
+        overlap = bool(want_surnames & _cr_surnames(item))
+        # Accept a near-exact title, or a looser title backed by an author overlap.
+        if not (sim >= _TITLE_NEAR_EXACT
+                or (sim >= 0.72 and overlap)
+                or (sim >= _TITLE_MATCH_THRESHOLD and (overlap or not want_surnames))):
             continue
         wy = _cr_year(item)
         if year and wy and wy < year - 1:
@@ -139,7 +158,7 @@ def lookup_publication(
         work_type = item.get("type", "")
         is_journal = _is_real_journal(container, work_type)
         match = PublicationMatch(
-            openalex_id=("https://doi.org/" + item["DOI"]) if item.get("DOI") else "",
+            openalex_id=("https://doi.org/" + doi) if doi else "",
             matched_title=cand_title,
             work_type=work_type,
             source_name=container,
@@ -147,13 +166,14 @@ def lookup_publication(
             publication_year=wy,
             title_similarity=round(sim, 3),
         )
-        # Prefer the closest title; at a tie prefer a real journal over a preprint
-        # (so the published version wins over an SSRN/arXiv copy of the same paper).
-        if (
+        # Prefer a real journal over a preprint; within the same kind, higher title
+        # similarity. So the published JFE version beats an SSRN copy of equal title.
+        better = (
             best is None
-            or match.title_similarity > best.title_similarity
-            or (match.title_similarity == best.title_similarity
-                and match.is_journal_article and not best.is_journal_article)
-        ):
+            or (match.is_journal_article and not best.is_journal_article)
+            or (match.is_journal_article == best.is_journal_article
+                and match.title_similarity > best.title_similarity)
+        )
+        if better:
             best = match
     return best
