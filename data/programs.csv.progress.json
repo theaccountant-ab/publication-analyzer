@@ -15,9 +15,24 @@
 "total": 6
 },
 "European Finance Association|2023": {
-"complete": false,
-"done": 6,
+"complete": true,
+"done": 9,
 "total": 9
+},
+"European Finance Association|2024": {
+"complete": true,
+"done": 6,
+"total": 6
+},
+"FMA Annual Meeting|2020": {
+"complete": true,
+"done": 11,
+"total": 11
+},
+"FMA Annual Meeting|2021": {
+"complete": false,
+"done": 1,
+"total": 11
 },
 "Western Finance Association|2020": {
 "complete": true,
