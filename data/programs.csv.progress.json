@@ -40,9 +40,19 @@
 "total": 10
 },
 "FMA Annual Meeting|2023": {
-"complete": false,
-"done": 5,
+"complete": true,
+"done": 9,
 "total": 9
+},
+"FMA Annual Meeting|2024": {
+"complete": true,
+"done": 9,
+"total": 9
+},
+"Southern Finance Association|2020": {
+"complete": false,
+"done": 4,
+"total": 5
 },
 "Western Finance Association|2020": {
 "complete": true,
