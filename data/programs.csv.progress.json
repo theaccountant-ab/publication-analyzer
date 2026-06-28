@@ -50,9 +50,29 @@
 "total": 9
 },
 "Southern Finance Association|2020": {
+"complete": true,
+"done": 5,
+"total": 5
+},
+"Southern Finance Association|2021": {
+"complete": true,
+"done": 5,
+"total": 5
+},
+"Southern Finance Association|2022": {
+"complete": true,
+"done": 6,
+"total": 6
+},
+"Southern Finance Association|2023": {
+"complete": true,
+"done": 6,
+"total": 6
+},
+"Southern Finance Association|2024": {
 "complete": false,
 "done": 4,
-"total": 5
+"total": 6
 },
 "Western Finance Association|2020": {
 "complete": true,
