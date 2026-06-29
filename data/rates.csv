@@ -1,5 +1,6 @@
 conference,years,total_presented,matched_in_openalex,published_in_journal,top_tier_papers,top_tier_fraction,error
 Western Finance Association,2024 2023 2022 2021 2020 2019,741,543,274,246,0.3320,
 European Finance Association,4746 4544 4342 4140 3938 2024 2023 2022 2021 2020,1186,825,366,298,0.2513,
-FMA Annual Meeting,2024 2023 2022 2021 2020 2019,3540,954,528,168,0.0475,
-Southern Finance Association,2024 2023 2022 2021 2020 2016 2012,1075,94,47,12,0.0112,
+FMA Annual Meeting,2024 2023 2022 2021 2020 2019,3540,1223,663,201,0.0568,
+Southern Finance Association,2024 2023 2022 2021 2020 2016 2012,1123,113,57,14,0.0125,
+China International Conference in Finance,2024 2023 2022 2021,751,110,53,47,0.0626,

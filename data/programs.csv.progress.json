@@ -1,4 +1,24 @@
 {
+"China International Conference in Finance|2021": {
+"complete": true,
+"done": 5,
+"total": 5
+},
+"China International Conference in Finance|2022": {
+"complete": true,
+"done": 5,
+"total": 5
+},
+"China International Conference in Finance|2023": {
+"complete": true,
+"done": 4,
+"total": 4
+},
+"China International Conference in Finance|2024": {
+"complete": false,
+"done": 1,
+"total": 4
+},
 "European Finance Association|2020": {
 "complete": true,
 "done": 6,
@@ -70,8 +90,8 @@
 "total": 6
 },
 "Southern Finance Association|2024": {
-"complete": false,
-"done": 4,
+"complete": true,
+"done": 6,
 "total": 6
 },
 "Western Finance Association|2020": {
