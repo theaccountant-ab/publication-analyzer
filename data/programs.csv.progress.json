@@ -15,9 +15,19 @@
 "total": 4
 },
 "China International Conference in Finance|2024": {
-"complete": false,
-"done": 1,
+"complete": true,
+"done": 4,
 "total": 4
+},
+"EUROFIDAI-ESSEC Paris December Finance Meeting|2020": {
+"complete": true,
+"done": 5,
+"total": 5
+},
+"EUROFIDAI-ESSEC Paris December Finance Meeting|2021": {
+"complete": false,
+"done": 2,
+"total": 6
 },
 "European Finance Association|2020": {
 "complete": true,
@@ -68,6 +78,26 @@
 "complete": true,
 "done": 9,
 "total": 9
+},
+"Northern Finance Association|2021": {
+"complete": true,
+"done": 3,
+"total": 3
+},
+"Northern Finance Association|2022": {
+"complete": true,
+"done": 2,
+"total": 2
+},
+"Northern Finance Association|2023": {
+"complete": true,
+"done": 3,
+"total": 3
+},
+"Northern Finance Association|2024": {
+"complete": true,
+"done": 3,
+"total": 3
 },
 "Southern Finance Association|2020": {
 "complete": true,
