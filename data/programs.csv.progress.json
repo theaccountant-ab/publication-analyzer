@@ -25,8 +25,18 @@
 "total": 5
 },
 "EUROFIDAI-ESSEC Paris December Finance Meeting|2021": {
+"complete": true,
+"done": 6,
+"total": 6
+},
+"EUROFIDAI-ESSEC Paris December Finance Meeting|2022": {
+"complete": true,
+"done": 5,
+"total": 5
+},
+"EUROFIDAI-ESSEC Paris December Finance Meeting|2023": {
 "complete": false,
-"done": 2,
+"done": 5,
 "total": 6
 },
 "European Finance Association|2020": {
